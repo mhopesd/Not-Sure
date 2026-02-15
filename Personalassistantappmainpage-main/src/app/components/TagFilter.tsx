@@ -35,8 +35,8 @@ export function TagFilter({ availableTags, selectedTags, onTagToggle, onAddTag }
             <div className="flex flex-wrap gap-2">
                 <button
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors ${selectedTags.length === 0
-                            ? 'bg-purple-600/30 text-purple-300 border border-purple-500'
-                            : 'bg-white/5 text-gray-400 hover:bg-white/10 border border-transparent'
+                        ? 'bg-[#2774AE]/30 text-[#FFD100] border border-[#2774AE]'
+                        : 'bg-white/5 text-gray-400 hover:bg-white/10 border border-transparent'
                         }`}
                     onClick={() => selectedTags.forEach(tag => onTagToggle(tag))}
                 >
@@ -51,8 +51,8 @@ export function TagFilter({ availableTags, selectedTags, onTagToggle, onAddTag }
                             key={tag}
                             onClick={() => onTagToggle(tag)}
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors ${isSelected
-                                    ? 'bg-purple-600/30 text-purple-300 border border-purple-500'
-                                    : 'bg-white/5 text-gray-400 hover:bg-white/10 border border-transparent'
+                                ? 'bg-[#2774AE]/30 text-[#FFD100] border border-[#2774AE]'
+                                : 'bg-white/5 text-gray-400 hover:bg-white/10 border border-transparent'
                                 }`}
                         >
                             {isSelected && <Check className="w-3.5 h-3.5" />}
@@ -74,12 +74,12 @@ export function TagFilter({ availableTags, selectedTags, onTagToggle, onAddTag }
                                 onKeyDown={handleKeyDown}
                                 placeholder="Tag name..."
                                 autoFocus
-                                className="px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                                className="px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-[#2774AE]"
                             />
                             <button
                                 onClick={handleAddTag}
                                 disabled={!newTagName.trim()}
-                                className="p-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="p-1.5 rounded-lg bg-[#2774AE] hover:bg-[#1e5f8e] text-white disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 <Check className="w-4 h-4" />
                             </button>
@@ -126,7 +126,7 @@ export function TagSidebar({ tags, selectedTag, onTagSelect, onAddTag }: TagSide
     };
 
     const tagColors: { [key: string]: string } = {
-        'Follow-up': 'bg-purple-500',
+        'Follow-up': 'bg-[#2774AE]',
         'Important': 'bg-red-500',
         'Meeting Notes': 'bg-blue-500',
         'Work': 'bg-green-500',
@@ -148,8 +148,8 @@ export function TagSidebar({ tags, selectedTag, onTagSelect, onAddTag }: TagSide
                     key={tag}
                     onClick={() => onTagSelect(selectedTag === tag ? null : tag)}
                     className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${selectedTag === tag
-                            ? 'bg-white/10 text-white'
-                            : 'text-gray-400 hover:bg-white/5 hover:text-white'
+                        ? 'bg-white/10 text-white'
+                        : 'text-gray-400 hover:bg-white/5 hover:text-white'
                         }`}
                 >
                     <div className={`w-2 h-2 rounded-full ${getTagColor(tag)}`} />
@@ -170,7 +170,7 @@ export function TagSidebar({ tags, selectedTag, onTagSelect, onAddTag }: TagSide
                         }}
                         placeholder="New tag..."
                         autoFocus
-                        className="w-full px-2 py-1 bg-white/5 border border-white/10 rounded text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                        className="w-full px-2 py-1 bg-white/5 border border-white/10 rounded text-sm text-white placeholder-gray-500 focus:outline-none focus:border-[#2774AE]"
                     />
                 </div>
             ) : (

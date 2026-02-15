@@ -25,14 +25,14 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
   const [isCreating, setIsCreating] = useState(false);
   const [optimizingId, setOptimizingId] = useState<string | null>(null);
   const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
-  
+
   // Voice recording state
   const [isRecording, setIsRecording] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [duration, setDuration] = useState(0);
   const [microphoneError, setMicrophoneError] = useState<string | null>(null);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
-  
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recognitionRef = useRef<any>(null);
   const durationIntervalRef = useRef<number | null>(null);
@@ -40,7 +40,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
   useEffect(() => {
     // Check if browser supports Speech Recognition
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    
+
     if (SpeechRecognition) {
       const recognition = new SpeechRecognition();
       recognition.continuous = true;
@@ -69,7 +69,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
       recognitionRef.current = recognition;
     }
   }, []);
-  
+
   const handleCreateEntry = async () => {
     if (!newEntry.trim() && !transcript.trim()) {
       alert('Please write something in your journal entry');
@@ -129,9 +129,9 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
       }, 1000);
     } catch (error: any) {
       console.error('Error accessing microphone:', error);
-      
+
       let errorMessage = 'Could not access microphone. ';
-      
+
       if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
         errorMessage += 'Microphone permission was denied. Please click the camera/microphone icon in your browser\'s address bar and allow microphone access, then try again.';
       } else if (error.name === 'NotFoundError') {
@@ -141,7 +141,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
       } else {
         errorMessage += 'Please check your browser settings and ensure microphone access is enabled.';
       }
-      
+
       setMicrophoneError(errorMessage);
     }
   };
@@ -161,7 +161,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
     }
 
     setIsRecording(false);
-    
+
     // Generate AI summary from transcript
     if (transcript.trim()) {
       await generateSummary(transcript);
@@ -220,43 +220,43 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
                 Stop Recording
               </Button>
             )}
-            
+
             {isRecording && (
               <div className="flex items-center gap-2">
                 <div className="w-3 h-3 bg-red-600 rounded-full animate-pulse" />
                 <span className="text-sm">{formatDuration(duration)}</span>
               </div>
             )}
-            
+
             {isGeneratingSummary && (
-              <div className="flex items-center gap-2 text-sm text-gray-600">
+              <div className="flex items-center gap-2 text-sm text-gray-400">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Generating summary...
               </div>
             )}
           </div>
-          
+
           {microphoneError && (
-            <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-sm text-red-800">
+            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg">
+              <p className="text-sm text-red-400">
                 <strong>Microphone Error:</strong> {microphoneError}
               </p>
             </div>
           )}
-          
+
           {!recognitionRef.current && (
-            <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-              <p className="text-sm text-yellow-800">
-                <strong>Note:</strong> Speech recognition is not supported in your browser. 
+            <div className="p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+              <p className="text-sm text-yellow-400">
+                <strong>Note:</strong> Speech recognition is not supported in your browser.
                 Recording will continue, but live transcription is unavailable.
               </p>
             </div>
           )}
 
           {transcript && (
-            <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
               <h4 className="text-sm mb-2">Voice Transcript:</h4>
-              <p className="text-sm text-gray-700 whitespace-pre-wrap">{transcript}</p>
+              <p className="text-sm text-gray-300 whitespace-pre-wrap">{transcript}</p>
             </div>
           )}
 
@@ -270,7 +270,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
               disabled={isRecording}
             />
           </div>
-          
+
           <Button
             onClick={handleCreateEntry}
             disabled={isCreating || isRecording || isGeneratingSummary || (!newEntry.trim() && !transcript.trim())}
@@ -297,7 +297,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
                 <Card key={entry.id} className="p-6">
                   <div className="space-y-4">
                     <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-2 text-sm text-gray-600">
+                      <div className="flex items-center gap-2 text-sm text-gray-400">
                         <Calendar className="w-4 h-4" />
                         {format(new Date(entry.date), 'EEEE, MMMM d, yyyy')} at {format(new Date(entry.date), 'h:mm a')}
                       </div>
@@ -314,7 +314,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
                       <div className="space-y-4 pt-4 border-t">
                         <div>
                           <h4 className="mb-2">Entry</h4>
-                          <div className="p-4 bg-gray-50 rounded-lg">
+                          <div className="p-4 bg-white/5 rounded-lg">
                             <p className="whitespace-pre-wrap text-sm">{entry.entry}</p>
                           </div>
                         </div>
@@ -342,7 +342,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
                             )}
                           </div>
                           {entry.aiSuggestions ? (
-                            <div className="p-4 bg-gradient-to-br from-purple-50 to-blue-50 rounded-lg border border-purple-200">
+                            <div className="p-4 bg-[#2774AE]/10 rounded-lg border border-[#2774AE]/20">
                               <p className="whitespace-pre-wrap text-sm">{entry.aiSuggestions}</p>
                             </div>
                           ) : (
@@ -356,7 +356,7 @@ export function JournalInterface({ entries, onCreateEntry, onOptimizeEntry }: Jo
 
                     {!isExpanded && (
                       <div className="pt-2">
-                        <p className="text-sm text-gray-600 line-clamp-2">
+                        <p className="text-sm text-gray-400 line-clamp-2">
                           {entry.entry}
                         </p>
                       </div>

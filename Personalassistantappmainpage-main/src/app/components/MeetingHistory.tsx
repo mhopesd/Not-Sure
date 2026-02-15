@@ -138,7 +138,7 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
   if (meetings.length === 0) {
     return (
       <Card className="p-6">
-        <p className="text-center text-gray-500">No meetings recorded yet</p>
+        <p className="text-center text-gray-400">No meetings recorded yet</p>
       </Card>
     );
   }
@@ -183,7 +183,7 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
                       onClick={() => onMeetingClick?.(meeting.id)}
                     >
                       {/* Title */}
-                      <h3 className="text-white font-medium mb-1 hover:text-purple-400 transition-colors">
+                      <h3 className="text-white font-medium mb-1 hover:text-[#FFD100] transition-colors">
                         {meeting.title}
                       </h3>
 
@@ -232,7 +232,7 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
                             <Badge
                               key={tag}
                               variant="outline"
-                              className="text-xs bg-purple-600/10 border-purple-500/30 text-purple-300"
+                              className="text-xs bg-[#2774AE]/10 border-[#2774AE]/30 text-[#FFD100]"
                             >
                               {tag}
                             </Badge>
@@ -294,7 +294,7 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
                           )}
                         </div>
                         {meeting.nextSteps ? (
-                          <div className="p-3 bg-purple-600/10 rounded-lg border border-purple-500/20">
+                          <div className="p-3 bg-[#2774AE]/10 rounded-lg border border-[#2774AE]/20">
                             <p className="text-sm text-gray-300 whitespace-pre-wrap">
                               {meeting.nextSteps}
                             </p>
@@ -320,7 +320,7 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
           <p className="text-gray-400">No meetings match the selected tags</p>
           <button
             onClick={() => setSelectedTags([])}
-            className="mt-2 text-purple-400 hover:text-purple-300 text-sm"
+            className="mt-2 text-[#FFD100] hover:text-[#FFD100]/80 text-sm"
           >
             Clear filters
           </button>

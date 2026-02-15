@@ -83,7 +83,7 @@ export function MicrophoneSelector({ isOpen, onClose, onSelect }: MicrophoneSele
                 <div className="p-4">
                     {isLoading ? (
                         <div className="flex items-center justify-center py-8">
-                            <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                            <div className="w-6 h-6 border-2 border-[#2774AE] border-t-transparent rounded-full animate-spin" />
                         </div>
                     ) : error ? (
                         <div className="text-center py-8">
@@ -103,13 +103,13 @@ export function MicrophoneSelector({ isOpen, onClose, onSelect }: MicrophoneSele
                                     onClick={() => device.available && setSelectedDevice(device.id)}
                                     disabled={!device.available}
                                     className={`w-full flex items-center gap-3 p-3 rounded-lg transition-all ${selectedDevice === device.id
-                                            ? 'bg-purple-600/30 border border-purple-500'
-                                            : device.available
-                                                ? 'bg-white/5 border border-transparent hover:bg-white/10'
-                                                : 'bg-white/5 border border-transparent opacity-50 cursor-not-allowed'
+                                        ? 'bg-[#2774AE]/30 border border-[#2774AE]'
+                                        : device.available
+                                            ? 'bg-white/5 border border-transparent hover:bg-white/10'
+                                            : 'bg-white/5 border border-transparent opacity-50 cursor-not-allowed'
                                         }`}
                                 >
-                                    <div className={`p-2 rounded-lg ${selectedDevice === device.id ? 'bg-purple-600' : 'bg-white/10'
+                                    <div className={`p-2 rounded-lg ${selectedDevice === device.id ? 'bg-[#2774AE]' : 'bg-white/10'
                                         }`}>
                                         {getDeviceIcon(device.id)}
                                     </div>
@@ -120,7 +120,7 @@ export function MicrophoneSelector({ isOpen, onClose, onSelect }: MicrophoneSele
                                         )}
                                     </div>
                                     {selectedDevice === device.id && (
-                                        <Check className="w-5 h-5 text-purple-400" />
+                                        <Check className="w-5 h-5 text-[#FFD100]" />
                                     )}
                                 </button>
                             ))}
@@ -139,7 +139,7 @@ export function MicrophoneSelector({ isOpen, onClose, onSelect }: MicrophoneSele
                     <button
                         onClick={handleConfirm}
                         disabled={isLoading || !!error}
-                        className="flex-1 px-4 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-700 transition-colors text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="flex-1 px-4 py-2.5 rounded-lg bg-[#2774AE] hover:bg-[#1e5f8e] transition-colors text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                         Start Recording
                     </button>

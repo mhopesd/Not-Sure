@@ -128,13 +128,13 @@ export function SettingsPanel() {
             {isChecking ? (
               <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
             ) : isConfigured ? (
-              <CheckCircle2 className="w-4 h-4 text-green-600" />
+              <CheckCircle2 className="w-4 h-4 text-green-400" />
             ) : (
-              <AlertCircle className="w-4 h-4 text-yellow-600" />
+              <AlertCircle className="w-4 h-4 text-yellow-400" />
             )}
           </div>
 
-          <p className="text-sm text-gray-600 mb-4">
+          <p className="text-sm text-gray-400 mb-4">
             Required for AI analysis of meetings and journal entries. Select your preferred LLM provider.
           </p>
 
@@ -158,13 +158,13 @@ export function SettingsPanel() {
             <div>
               <Label htmlFor="api-key">{currentProvider.label} API Key</Label>
               {currentProvider.link && (
-                <p className="text-sm text-gray-600 mb-2 mt-1">
+                <p className="text-sm text-gray-400 mb-2 mt-1">
                   Get your API key from{' '}
                   <a
                     href={currentProvider.link}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-blue-600 hover:underline"
+                    className="text-blue-400 hover:underline"
                   >
                     {currentProvider.label}
                   </a>
@@ -188,7 +188,7 @@ export function SettingsPanel() {
             </Button>
 
             {saveMessage && (
-              <p className={`text-sm ${saveMessage.includes('Error') ? 'text-red-600' : 'text-green-600'}`}>
+              <p className={`text-sm ${saveMessage.includes('Error') ? 'text-red-400' : 'text-green-400'}`}>
                 {saveMessage}
               </p>
             )}
@@ -197,7 +197,7 @@ export function SettingsPanel() {
 
         <div className="pt-4 border-t">
           <h3 className="mb-2">Service Integrations</h3>
-          <p className="text-sm text-gray-600 mb-4">
+          <p className="text-sm text-gray-400 mb-4">
             Connect your Outlook, Gmail, and Calendar accounts to sync events and share meeting summaries.
           </p>
           <IntegrationsPanel />
@@ -205,7 +205,7 @@ export function SettingsPanel() {
 
         <div className="pt-4 border-t">
           <h3 className="mb-2">About</h3>
-          <p className="text-sm text-gray-600">
+          <p className="text-sm text-gray-400">
             This personal assistant helps you record meetings, transcribe them, and use AI to extract action items and optimize your workflow.
           </p>
         </div>

@@ -104,7 +104,7 @@ export function CalendarEventsPanel() {
     if (isLoading) {
         return (
             <div className="flex items-center justify-center py-20">
-                <Loader2 className="w-6 h-6 animate-spin text-purple-400" />
+                <Loader2 className="w-6 h-6 animate-spin text-[#2774AE]" />
             </div>
         );
     }
@@ -112,8 +112,8 @@ export function CalendarEventsPanel() {
     if (!hasConnected) {
         return (
             <div className="flex flex-col items-center justify-center py-20 text-center">
-                <div className="w-16 h-16 rounded-2xl bg-purple-600/10 flex items-center justify-center mb-4">
-                    <Calendar className="w-8 h-8 text-purple-400" />
+                <div className="w-16 h-16 rounded-2xl bg-[#2774AE]/10 flex items-center justify-center mb-4">
+                    <Calendar className="w-8 h-8 text-[#2774AE]" />
                 </div>
                 <h3 className="text-xl font-semibold text-white mb-2">No Calendar Connected</h3>
                 <p className="text-gray-400 max-w-sm mb-6">
@@ -143,12 +143,12 @@ export function CalendarEventsPanel() {
                     <select
                         value={daysAhead}
                         onChange={(e) => setDaysAhead(Number(e.target.value))}
-                        className="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-purple-500"
+                        className="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#2774AE]"
                     >
-                        <option value={3}>Next 3 days</option>
-                        <option value={7}>Next 7 days</option>
-                        <option value={14}>Next 14 days</option>
-                        <option value={30}>Next 30 days</option>
+                        <option value={3} className="bg-[#1a1a1a]">Next 3 days</option>
+                        <option value={7} className="bg-[#1a1a1a]">Next 7 days</option>
+                        <option value={14} className="bg-[#1a1a1a]">Next 14 days</option>
+                        <option value={30} className="bg-[#1a1a1a]">Next 30 days</option>
                     </select>
                     <button
                         onClick={() => fetchEvents(true)}

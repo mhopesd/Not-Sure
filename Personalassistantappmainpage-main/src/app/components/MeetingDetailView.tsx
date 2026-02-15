@@ -217,7 +217,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
     if (isLoading) {
         return (
             <div className="flex items-center justify-center py-20">
-                <div className="w-8 h-8 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                <div className="w-8 h-8 border-2 border-[#2774AE] border-t-transparent rounded-full animate-spin" />
             </div>
         );
     }
@@ -226,7 +226,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
         return (
             <div className="text-center py-20">
                 <p className="text-gray-400">Meeting not found</p>
-                <button onClick={onBack} className="mt-4 text-purple-400 hover:text-purple-300">
+                <button onClick={onBack} className="mt-4 text-[#FFD100] hover:text-[#FFD100]/80">
                     ← Back to meetings
                 </button>
             </div>
@@ -262,8 +262,8 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                         <button
                             onClick={() => connectedEmailProvider ? setShowShareDialog(true) : toast?.error('Connect an email provider in Settings first')}
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors ${connectedEmailProvider
-                                    ? 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/30'
-                                    : 'bg-white/5 text-gray-500 hover:bg-white/10'
+                                ? 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/30'
+                                : 'bg-white/5 text-gray-500 hover:bg-white/10'
                                 }`}
                             title={connectedEmailProvider ? 'Share meeting summary via email' : 'Connect an email provider in Settings'}
                         >
@@ -274,8 +274,8 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                             onClick={() => connectedCalendarProvider ? handleAddToCalendar() : toast?.error('Connect a calendar provider in Settings first')}
                             disabled={isAddingToCalendar}
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors ${connectedCalendarProvider
-                                    ? 'bg-purple-600/20 text-purple-400 hover:bg-purple-600/30'
-                                    : 'bg-white/5 text-gray-500 hover:bg-white/10'
+                                ? 'bg-[#2774AE]/20 text-[#2774AE] hover:bg-[#2774AE]/30'
+                                : 'bg-white/5 text-gray-500 hover:bg-white/10'
                                 }`}
                             title={connectedCalendarProvider ? 'Add this meeting to your calendar' : 'Connect a calendar provider in Settings'}
                         >
@@ -367,7 +367,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                         key={tab.id}
                         onClick={() => setActiveTab(tab.id)}
                         className={`pb-3 transition-colors ${activeTab === tab.id
-                            ? 'text-white border-b-2 border-purple-500 font-medium'
+                            ? 'text-white border-b-2 border-[#2774AE] font-medium'
                             : 'text-gray-400 hover:text-white'
                             }`}
                     >
@@ -410,7 +410,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                                     <ul className="space-y-3">
                                         {meeting.highlights.map((highlight, idx) => (
                                             <li key={idx} className="flex items-start gap-2 text-gray-300">
-                                                <span className="text-purple-400 mt-1">•</span>
+                                                <span className="text-[#FFD100] mt-1">•</span>
                                                 <span>{highlight}</span>
                                             </li>
                                         ))}
@@ -457,7 +457,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                                     <span className="text-sm text-gray-400">All</span>
                                 </div>
                             </div>
-                            <button className="text-sm text-purple-400 hover:text-purple-300 flex items-center gap-1">
+                            <button className="text-sm text-[#FFD100] hover:text-[#FFD100]/80 flex items-center gap-1">
                                 <Plus className="w-4 h-4" /> Add Task
                             </button>
                         </div>
@@ -473,7 +473,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                                             type="checkbox"
                                             checked={task.completed || false}
                                             onChange={() => { }}
-                                            className="mt-1 w-4 h-4 rounded border-gray-600 bg-transparent text-purple-600 focus:ring-purple-500"
+                                            className="mt-1 w-4 h-4 rounded border-gray-600 bg-transparent text-[#2774AE] focus:ring-[#2774AE]"
                                         />
                                         <div className="flex-1">
                                             <p className="text-gray-300">
@@ -481,7 +481,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                                             </p>
                                             {(task.assignee || task.speaker) && (
                                                 <div className="flex items-center gap-2 mt-1">
-                                                    <div className="w-5 h-5 rounded-full bg-purple-600 flex items-center justify-center text-xs text-white">
+                                                    <div className="w-5 h-5 rounded-full bg-[#2774AE] flex items-center justify-center text-xs text-white">
                                                         {(task.assignee || task.speaker || '?')[0].toUpperCase()}
                                                     </div>
                                                     <span className="text-sm text-gray-500">{task.assignee || task.speaker}</span>

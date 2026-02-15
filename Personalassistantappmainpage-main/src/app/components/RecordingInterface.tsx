@@ -207,14 +207,14 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
               value={meetingTitle}
               onChange={(e) => setMeetingTitle(e.target.value)}
               placeholder="Meeting title (optional)"
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 transition-colors"
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-[#2774AE] transition-colors"
             />
           </div>
 
           {/* Start button */}
           <button
             onClick={handleStartClick}
-            className="flex items-center gap-3 px-8 py-4 bg-purple-600 hover:bg-purple-700 rounded-xl text-white font-semibold text-lg transition-all transform hover:scale-105 shadow-lg shadow-purple-500/25"
+            className="flex items-center gap-3 px-8 py-4 bg-[#2774AE] hover:bg-[#1e5f8e] rounded-xl text-white font-semibold text-lg transition-all transform hover:scale-105 shadow-lg shadow-[#2774AE]/25"
           >
             <Mic className="w-6 h-6" />
             Start Recording
@@ -233,7 +233,7 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
         <div className="flex-1 flex flex-col">
           {/* Tabs */}
           <div className="flex gap-6 border-b border-white/10 mb-6">
-            <button className="pb-3 text-white border-b-2 border-purple-500 font-medium">
+            <button className="pb-3 text-white border-b-2 border-[#2774AE] font-medium">
               Scratchpad
             </button>
             <button className="pb-3 text-gray-400 hover:text-white transition-colors">

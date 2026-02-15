@@ -206,13 +206,13 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[#111] dark">
       <Toaster />
 
       <div className="container max-w-6xl mx-auto p-6">
         <header className="mb-8">
           <h1 className="mb-2">Personal Assistant</h1>
-          <p className="text-gray-600">
+          <p className="text-gray-400">
             Record meetings, track your journey, and get AI-powered insights
           </p>
         </header>
@@ -262,7 +262,7 @@ export default function App() {
               <>
                 <div className="mb-4">
                   <h2>Meeting History</h2>
-                  <p className="text-sm text-gray-600">
+                  <p className="text-sm text-gray-400">
                     View all your recorded meetings with speakers, timestamps, and AI-generated next steps
                   </p>
                 </div>

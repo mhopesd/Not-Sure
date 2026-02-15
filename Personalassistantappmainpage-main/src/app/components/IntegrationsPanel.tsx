@@ -36,9 +36,9 @@ const providerMeta = {
         description: 'Outlook email & Calendar',
         icon: '🪟',
         color: 'from-blue-500 to-blue-700',
-        bgLight: 'bg-blue-50',
-        textColor: 'text-blue-700',
-        borderColor: 'border-blue-200',
+        bgLight: 'bg-blue-500/10',
+        textColor: 'text-blue-400',
+        borderColor: 'border-blue-500/30',
         features: ['Outlook Email', 'Calendar Sync'],
         credentialsHelp: 'Register an app in Azure Portal → App Registrations → New Registration',
         credentialsLink: 'https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
@@ -50,9 +50,9 @@ const providerMeta = {
         description: 'Gmail & Google Calendar',
         icon: '🔵',
         color: 'from-red-500 to-yellow-500',
-        bgLight: 'bg-red-50',
-        textColor: 'text-red-700',
-        borderColor: 'border-red-200',
+        bgLight: 'bg-red-500/10',
+        textColor: 'text-red-400',
+        borderColor: 'border-red-500/30',
         features: ['Gmail', 'Google Calendar'],
         credentialsHelp: 'Create OAuth 2.0 Client ID in Google Cloud Console → APIs & Services → Credentials',
         credentialsLink: 'https://console.cloud.google.com/apis/credentials',
@@ -228,7 +228,7 @@ export function IntegrationsPanel() {
                                         {meta.icon}
                                     </div>
                                     <div>
-                                        <h4 className="font-semibold text-gray-900">{meta.label}</h4>
+                                        <h4 className="font-semibold text-white">{meta.label}</h4>
                                         <p className="text-sm text-gray-500">{meta.description}</p>
                                     </div>
                                 </div>
@@ -236,9 +236,9 @@ export function IntegrationsPanel() {
                                 <div className="flex items-center gap-2">
                                     {isConnected ? (
                                         <>
-                                            <div className="flex items-center gap-1.5 px-3 py-1 bg-green-50 rounded-full">
-                                                <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                                                <span className="text-xs font-medium text-green-700">Connected</span>
+                                            <div className="flex items-center gap-1.5 px-3 py-1 bg-green-500/10 rounded-full">
+                                                <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                                                <span className="text-xs font-medium text-green-400">Connected</span>
                                             </div>
                                             <Button
                                                 variant="ghost"
@@ -274,7 +274,7 @@ export function IntegrationsPanel() {
                                     <div className="flex items-center gap-4 text-sm">
                                         <div className="flex items-center gap-1.5">
                                             <Mail className="w-3.5 h-3.5 text-gray-500" />
-                                            <span className="text-gray-700">{providerStatus.email}</span>
+                                            <span className="text-gray-300">{providerStatus.email}</span>
                                         </div>
                                         {providerStatus.display_name && (
                                             <span className="text-gray-500">({providerStatus.display_name})</span>
@@ -313,25 +313,25 @@ export function IntegrationsPanel() {
 
                         {/* Expandable credentials section */}
                         {isExpanded && (
-                            <div className="border-t bg-gray-50 p-5 space-y-4">
+                            <div className="border-t border-white/10 bg-white/5 p-5 space-y-4">
                                 <div className="flex items-start gap-2">
                                     <Shield className="w-4 h-4 text-gray-400 mt-0.5 shrink-0" />
                                     <div>
-                                        <p className="text-sm text-gray-600">{meta.credentialsHelp}</p>
+                                        <p className="text-sm text-gray-400">{meta.credentialsHelp}</p>
                                         <a
                                             href={meta.credentialsLink}
                                             target="_blank"
                                             rel="noopener noreferrer"
-                                            className="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline mt-1"
+                                            className="inline-flex items-center gap-1 text-sm text-blue-400 hover:underline mt-1"
                                         >
                                             Open Developer Console <ExternalLink className="w-3 h-3" />
                                         </a>
                                     </div>
                                 </div>
 
-                                <div className="bg-white p-3 rounded-lg border text-xs text-gray-500 space-y-1">
-                                    <p><strong>Redirect URI:</strong> <code className="bg-gray-100 px-1 rounded">{meta.redirectUri}</code></p>
-                                    <p><strong>Scopes:</strong> <code className="bg-gray-100 px-1 rounded">{meta.scopes}</code></p>
+                                <div className="bg-white/5 p-3 rounded-lg border border-white/10 text-xs text-gray-400 space-y-1">
+                                    <p><strong>Redirect URI:</strong> <code className="bg-white/10 px-1 rounded">{meta.redirectUri}</code></p>
+                                    <p><strong>Scopes:</strong> <code className="bg-white/10 px-1 rounded">{meta.scopes}</code></p>
                                 </div>
 
                                 <div className="space-y-3">
@@ -381,7 +381,7 @@ export function IntegrationsPanel() {
                                     </div>
 
                                     {credMessage && (
-                                        <p className={`text-sm ${credMessage.includes('Error') || credMessage.includes('required') ? 'text-red-600' : 'text-green-600'}`}>
+                                        <p className={`text-sm ${credMessage.includes('Error') || credMessage.includes('required') ? 'text-red-400' : 'text-green-400'}`}>
                                             {credMessage}
                                         </p>
                                     )}
@@ -393,11 +393,11 @@ export function IntegrationsPanel() {
             })}
 
             {/* Info note */}
-            <div className="flex items-start gap-2 p-3 bg-amber-50 rounded-lg text-sm text-amber-800">
+            <div className="flex items-start gap-2 p-3 bg-amber-500/10 rounded-lg text-sm text-amber-300">
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
                 <div>
                     <p className="font-medium">Getting Started</p>
-                    <p className="text-amber-700 mt-0.5">
+                    <p className="text-amber-400 mt-0.5">
                         To connect a service, you'll first need to register your app in the provider's developer console
                         and enter the Client ID and Secret above. Your credentials are stored locally and never shared.
                     </p>

@@ -71,20 +71,20 @@ export function ProcessingProgress({ isVisible, meetingTitle, onComplete }: Proc
                     <div key={step.id} className="flex items-center gap-3">
                         <div className="w-5 h-5 flex items-center justify-center">
                             {step.status === 'complete' ? (
-                                <div className="w-5 h-5 bg-purple-600 rounded-full flex items-center justify-center">
+                                <div className="w-5 h-5 bg-[#2774AE] rounded-full flex items-center justify-center">
                                     <Check className="w-3 h-3 text-white" />
                                 </div>
                             ) : step.status === 'processing' ? (
-                                <Loader2 className="w-5 h-5 text-purple-400 animate-spin" />
+                                <Loader2 className="w-5 h-5 text-[#2774AE] animate-spin" />
                             ) : (
                                 <div className="w-5 h-5 border-2 border-gray-600 rounded-full" />
                             )}
                         </div>
                         <span className={`text-sm ${step.status === 'complete'
-                                ? 'text-white'
-                                : step.status === 'processing'
-                                    ? 'text-purple-400'
-                                    : 'text-gray-500'
+                            ? 'text-white'
+                            : step.status === 'processing'
+                                ? 'text-[#FFD100]'
+                                : 'text-gray-500'
                             }`}>
                             {step.label}
                         </span>

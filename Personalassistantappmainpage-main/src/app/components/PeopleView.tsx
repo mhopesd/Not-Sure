@@ -18,7 +18,7 @@ interface PeopleViewProps {
 // Generate consistent color based on name
 function getAvatarColor(name: string): string {
     const colors = [
-        'bg-purple-500',
+        'bg-[#2774AE]',
         'bg-blue-500',
         'bg-green-500',
         'bg-yellow-500',
@@ -135,7 +135,7 @@ export function PeopleView({ onPersonClick }: PeopleViewProps) {
     if (isLoading) {
         return (
             <div className="flex items-center justify-center py-20">
-                <div className="w-8 h-8 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                <div className="w-8 h-8 border-2 border-[#2774AE] border-t-transparent rounded-full animate-spin" />
             </div>
         );
     }
@@ -167,7 +167,7 @@ export function PeopleView({ onPersonClick }: PeopleViewProps) {
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         placeholder="Search"
-                        className="pl-9 pr-4 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 w-64"
+                        className="pl-9 pr-4 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-[#2774AE] w-64"
                     />
                 </div>
             </div>
