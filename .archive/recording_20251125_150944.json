@@ -1,0 +1,7 @@
+{
+  "timestamp": "2025-11-25 15:09:44",
+  "mode": "microphone",
+  "llm": "gemini",
+  "transcript": " on the S and P over 100, what will be the dividend here on the S and P over 100 which I can basically look at what it is right now and you should take it to the closer of dividends for next year. And plus the pram and expected closer of dividends.",
+  "summary": "Error generating summary with Gemini: 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}"
+}

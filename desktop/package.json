@@ -1,0 +1,36 @@
+{
+    "name": "notsure",
+    "version": "1.0.0",
+    "description": "NotSure — Record meetings, get AI summaries, sync calendars",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron .",
+        "build": "electron-builder --mac",
+        "build-frontend": "cd ../Personalassistantappmainpage-main && npm run build"
+    },
+    "author": "Micha",
+    "license": "MIT",
+    "devDependencies": {
+        "electron": "^33.0.0",
+        "electron-builder": "^25.0.0"
+    },
+    "build": {
+        "appId": "com.micha.notsure",
+        "productName": "NotSure",
+        "mac": {
+            "category": "public.app-category.productivity",
+            "icon": "icons/icon.icns",
+            "target": [
+                "dir"
+            ]
+        },
+        "files": [
+            "main.js",
+            "preload.js",
+            "frontend/**/*"
+        ],
+        "directories": {
+            "output": "../dist/electron"
+        }
+    }
+}

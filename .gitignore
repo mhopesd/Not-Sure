@@ -1,0 +1,70 @@
+# Virtual environment
+venv/
+venv_new/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node
+node_modules/
+package-lock.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.wav
+*.mp3
+*.m4a
+
+# App config & personal data (contain API keys and user data)
+audio_config.ini
+audio_history.json
+session.json
+app_debug.log
+
+# Integration tokens & credentials (sensitive)
+integration_tokens.json
+integration_credentials.json
+
+# Desktop build artifacts
+desktop/NotSure.app/
+desktop/icons/icon.icns
+desktop/icons/icon.iconset/
+desktop/frontend/
+
+# Logs
+*.log.archive/
+
+# Gemini agent
+.gemini/

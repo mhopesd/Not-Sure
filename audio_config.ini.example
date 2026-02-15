@@ -1,0 +1,13 @@
+[API_KEYS]
+openai = 
+anthropic = 
+# Get your Gemini API key from https://aistudio.google.com/app/apikey
+gemini = 
+
+[SETTINGS]
+# Where to save the audio files and history
+history_directory = ~/Documents/Audio Recordings
+# Options: auto, openai, anthropic, gemini, ollama
+default_llm = gemini
+# Ollama model to use if selected (e.g. llama3, mistral)
+ollama_model = llama3:8b
