@@ -29,7 +29,6 @@ class PersonalAssistantMenuBar(rumps.App):
         super().__init__(
             "🎙",
             title="🎙",
-            quit_button=None,  # We'll add our own
         )
 
         # State
@@ -48,7 +47,6 @@ class PersonalAssistantMenuBar(rumps.App):
         self.insights_item = rumps.MenuItem("💡  Latest Insights")
         self.audio_source_menu = rumps.MenuItem("🎤  Audio Source")
         self.open_dashboard = rumps.MenuItem("🖥  Open Dashboard", callback=self.open_app)
-        self.quit_button = rumps.MenuItem("Quit", callback=self.quit_app)
 
         self.menu = [
             self.record_button,
@@ -58,16 +56,11 @@ class PersonalAssistantMenuBar(rumps.App):
             None,  # separator
             self.audio_source_menu,
             self.open_dashboard,
-            None,  # separator
-            self.quit_button,
         ]
 
-        # Polling thread
+        # Polling thread (also loads audio sources once menu is ready)
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
-
-        # Load audio sources on startup
-        self._load_audio_sources()
 
     # ─── Recording Control ───────────────────────────────────────
 
@@ -133,15 +126,18 @@ class PersonalAssistantMenuBar(rumps.App):
             resp = requests.get(f"{API_BASE}/api/devices", timeout=3)
             if resp.ok:
                 devices = resp.json().get("devices", [])
-                self.audio_source_menu.clear()
+                # Only clear if the native menu has been initialized
+                if hasattr(self.audio_source_menu, '_menu') and self.audio_source_menu._menu is not None:
+                    self.audio_source_menu.clear()
                 for device in devices:
                     name = device.get("name", "Unknown")
                     device_id = device.get("id", "")
                     item = rumps.MenuItem(name, callback=self._make_source_callback(device_id, name))
                     self.audio_source_menu.add(item)
         except Exception:
-            self.audio_source_menu.clear()
-            self.audio_source_menu.add(rumps.MenuItem("⚠ Backend offline"))
+            if hasattr(self.audio_source_menu, '_menu') and self.audio_source_menu._menu is not None:
+                self.audio_source_menu.clear()
+                self.audio_source_menu.add(rumps.MenuItem("⚠ Backend offline"))
 
     def _make_source_callback(self, device_id, name):
         def callback(sender):
@@ -223,7 +219,8 @@ class PersonalAssistantMenuBar(rumps.App):
             data = resp.json()
 
             # Update insights submenu
-            self.insights_item.clear()
+            if hasattr(self.insights_item, '_menu') and self.insights_item._menu is not None:
+                self.insights_item.clear()
             key_points = data.get("key_points", [])
             for point in key_points[:5]:
                 self.insights_item.add(rumps.MenuItem(f"• {point[:60]}"))
@@ -288,9 +285,6 @@ class PersonalAssistantMenuBar(rumps.App):
     def open_app(self, sender):
         """Open the dashboard in the default browser."""
         webbrowser.open("http://localhost:5173")
-
-    def quit_app(self, sender):
-        rumps.quit_application()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, Notification, shell, dialog } = require('electron');
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const http = require('http');
@@ -7,6 +7,13 @@ const fs = require('fs');
 // Keep references to prevent GC
 let mainWindow = null;
 let pythonProcess = null;
+let tray = null;
+
+// Tray state
+let isRecording = false;
+let lastActionCount = 0;
+let lastDecisionCount = 0;
+let trayPollInterval = null;
 
 const BACKEND_PORT = 8000;
 const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
@@ -194,6 +201,268 @@ function createWindow() {
     });
 }
 
+// ── Tray (Menu Bar) ───────────────────────────────────────────────
+
+/**
+ * Simple HTTP GET helper that returns parsed JSON.
+ */
+function apiGet(endpoint) {
+    return new Promise((resolve, reject) => {
+        const req = http.get(`${BACKEND_URL}${endpoint}`, (res) => {
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => {
+                try { resolve(JSON.parse(data)); }
+                catch { reject(new Error('Bad JSON')); }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(3000, () => { req.destroy(); reject(new Error('Timeout')); });
+    });
+}
+
+/**
+ * Simple HTTP POST helper.
+ */
+function apiPost(endpoint, body = {}) {
+    return new Promise((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const url = new URL(`${BACKEND_URL}${endpoint}`);
+        const req = http.request({
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+        }, (res) => {
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => {
+                try { resolve(JSON.parse(data)); }
+                catch { resolve({}); }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(10000, () => { req.destroy(); reject(new Error('Timeout')); });
+        req.write(payload);
+        req.end();
+    });
+}
+
+/**
+ * Format seconds as M:SS.
+ */
+function formatDuration(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Send a macOS notification.
+ */
+function sendNotification(title, body, subtitle = '') {
+    if (Notification.isSupported()) {
+        const n = new Notification({ title, body, subtitle, silent: true });
+        n.show();
+    }
+}
+
+/**
+ * Toggle recording on/off.
+ */
+async function toggleRecording() {
+    try {
+        if (isRecording) {
+            await apiPost('/api/recordings/stop');
+            isRecording = false;
+            lastActionCount = 0;
+            lastDecisionCount = 0;
+            sendNotification('Recording Saved', 'Transcript and summary are being generated.');
+        } else {
+            await apiPost('/api/recordings/start');
+            isRecording = true;
+            lastActionCount = 0;
+            lastDecisionCount = 0;
+            sendNotification('Recording Started', 'Your meeting is being recorded and analyzed.');
+        }
+        updateTrayMenu();
+    } catch (err) {
+        sendNotification('Error', err.message || 'Failed to toggle recording');
+    }
+}
+
+/**
+ * Build/rebuild the tray context menu.
+ */
+function updateTrayMenu(statusLine, insightItems) {
+    if (!tray) return;
+
+    const recordLabel = isRecording ? '⏹  Stop Recording' : '⏺  Start Recording';
+    const statusLabel = statusLine || (isRecording ? '📊  Recording...' : '📊  Status: Idle');
+
+    const menuTemplate = [
+        { label: recordLabel, click: toggleRecording },
+        { type: 'separator' },
+        { label: statusLabel, enabled: false },
+    ];
+
+    // Add insights submenu if available
+    if (insightItems && insightItems.length > 0) {
+        menuTemplate.push({
+            label: '💡  Live Insights',
+            submenu: insightItems.map((item) => ({ label: item, enabled: false })),
+        });
+    }
+
+    menuTemplate.push(
+        { type: 'separator' },
+        {
+            label: '🖥  Open Dashboard',
+            click: () => {
+                if (mainWindow) {
+                    mainWindow.show();
+                    mainWindow.focus();
+                } else {
+                    createWindow();
+                }
+            },
+        },
+        { type: 'separator' },
+        { label: 'Quit', click: () => app.quit() },
+    );
+
+    const contextMenu = Menu.buildFromTemplate(menuTemplate);
+    tray.setContextMenu(contextMenu);
+}
+
+/**
+ * Poll the backend for recording status and insights, update tray.
+ */
+async function pollBackend() {
+    try {
+        const status = await apiGet('/api/recordings/status');
+        isRecording = status.is_recording || false;
+
+        // Update tray title (shows next to icon in menu bar)
+        if (isRecording) {
+            const dur = formatDuration(status.duration || 0);
+            const mt = status.meeting_type ? status.meeting_type.replace(/_/g, ' ') : '';
+            const parts = [dur, mt, status.topic].filter(Boolean);
+            tray.setTitle(` ${parts.join(' · ')}`);
+        } else {
+            tray.setTitle('');
+        }
+
+        // Build status line
+        let statusLine;
+        if (isRecording) {
+            const parts = [formatDuration(status.duration || 0)];
+            if (status.meeting_type) parts.push(status.meeting_type.replace(/_/g, ' '));
+            if (status.topic) parts.push(status.topic);
+            statusLine = `📊  Recording ${parts.join(' | ')}`;
+        } else {
+            statusLine = '📊  Status: Idle';
+        }
+
+        // Fetch insights during recording
+        let insightItems = [];
+        if (isRecording) {
+            try {
+                const insights = await apiGet('/api/recordings/insights');
+
+                // Build submenu items
+                const kp = insights.key_points || [];
+                kp.slice(0, 5).forEach((p) => insightItems.push(`• ${p.slice(0, 60)}`));
+
+                const actions = insights.action_items || [];
+                if (actions.length > 0) {
+                    insightItems.push('── Action Items ──');
+                    actions.forEach((a) => {
+                        let label = `☐ ${(a.text || '').slice(0, 50)}`;
+                        if (a.assignee) label += ` → ${a.assignee}`;
+                        insightItems.push(label);
+                    });
+                }
+
+                const decisions = insights.decisions || [];
+                if (decisions.length > 0) {
+                    insightItems.push('── Decisions ──');
+                    decisions.forEach((d) => insightItems.push(`✓ ${d.slice(0, 60)}`));
+                }
+
+                // Notify on NEW action items
+                if (actions.length > lastActionCount && lastActionCount > 0) {
+                    const newOnes = actions.slice(lastActionCount);
+                    newOnes.forEach((a) => {
+                        sendNotification(
+                            '📋 Action Item',
+                            a.text || 'New action item',
+                            a.assignee ? `Assigned to ${a.assignee}` : ''
+                        );
+                    });
+                }
+                lastActionCount = actions.length;
+
+                // Notify on NEW decisions
+                if (decisions.length > lastDecisionCount && lastDecisionCount > 0) {
+                    const newOnes = decisions.slice(lastDecisionCount);
+                    newOnes.forEach((d) => {
+                        sendNotification('⚡ Decision Made', d);
+                    });
+                }
+                lastDecisionCount = decisions.length;
+
+            } catch { /* insights not available yet */ }
+        }
+
+        updateTrayMenu(statusLine, insightItems);
+
+    } catch {
+        // Backend not reachable
+        updateTrayMenu('📊  Status: Backend offline', []);
+    }
+}
+
+/**
+ * Create the system tray icon and menu.
+ */
+function createTray() {
+    // Create a template image for the tray (mic icon)
+    // Using a simple 16x16 emoji-based approach for macOS
+    tray = new Tray(nativeImage.createEmpty());
+    tray.setTitle('');
+    tray.setToolTip('Personal Assistant');
+
+    // Use the app icon resized for tray, or empty with title
+    const iconPath = path.join(__dirname, 'icons', 'icon.png');
+    if (fs.existsSync(iconPath)) {
+        const icon = nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 });
+        icon.setTemplateImage(true);
+        tray.setImage(icon);
+    }
+
+    // Build initial menu
+    updateTrayMenu();
+
+    // Click to show/hide window
+    tray.on('click', () => {
+        if (mainWindow) {
+            if (mainWindow.isVisible()) {
+                mainWindow.hide();
+            } else {
+                mainWindow.show();
+                mainWindow.focus();
+            }
+        } else {
+            createWindow();
+        }
+    });
+
+    // Start polling
+    trayPollInterval = setInterval(pollBackend, 5000);
+}
+
 // ── App Lifecycle ──────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
@@ -202,6 +471,9 @@ app.whenReady().then(async () => {
 
     // Create a splash/loading state
     createWindow();
+
+    // Create the menu bar tray icon
+    createTray();
 
     try {
         await waitForBackend();
@@ -226,11 +498,15 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-    stopBackend();
-    app.quit();
+    // On macOS, keep the app running in the tray when all windows are closed
+    if (process.platform !== 'darwin') {
+        stopBackend();
+        app.quit();
+    }
 });
 
 app.on('before-quit', () => {
+    if (trayPollInterval) clearInterval(trayPollInterval);
     stopBackend();
 });
 
@@ -239,3 +515,4 @@ app.on('activate', () => {
         createWindow();
     }
 });
+
