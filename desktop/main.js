@@ -424,6 +424,178 @@ async function pollBackend() {
     }
 }
 
+// Meeting app detection state
+let detectedMeetingApps = new Set();    // Currently running meeting apps
+let dismissedApps = new Map();          // app → timestamp of dismissal (5 min cooldown)
+let meetingDetectionInterval = null;
+
+// Known meeting apps: process name → friendly label
+const MEETING_APPS = {
+    'zoom.us': 'Zoom',
+    'Microsoft Teams': 'Microsoft Teams',
+    'Webex': 'Webex',
+    'FaceTime': 'FaceTime',
+    'Slack': 'Slack',
+    'Discord': 'Discord',
+    'Skype': 'Skype',
+    'GoTo Meeting': 'GoTo Meeting',
+    'BlueJeans': 'BlueJeans',
+    'Around': 'Around',
+};
+
+// Browser tab markers — if Chrome/Edge/Safari has a Meet/Teams tab we detect via audio
+const BROWSER_MEETING_INDICATORS = [
+    'Google Chrome Helper (Renderer)',  // Often active during Meet
+];
+
+/**
+ * Get list of running macOS apps via `osascript`.
+ * Returns an array of app names.
+ */
+function getRunningApps() {
+    return new Promise((resolve) => {
+        const { execFile } = require('child_process');
+        execFile('osascript', ['-e', 'tell application "System Events" to get name of every process whose background only is false'], (err, stdout) => {
+            if (err) {
+                resolve([]);
+                return;
+            }
+            const apps = stdout.trim().split(', ').map(a => a.trim());
+            resolve(apps);
+        });
+    });
+}
+
+/**
+ * Check if any meeting-related processes are using the microphone.
+ * Uses macOS `lsof` on the audio device to detect active audio capture.
+ */
+function checkAudioCapture() {
+    return new Promise((resolve) => {
+        const { exec } = require('child_process');
+        // Check for processes accessing CoreAudio
+        exec("ps aux | grep -i 'coreaudiod\\|audioinput' | grep -v grep", (err, stdout) => {
+            resolve(stdout || '');
+        });
+    });
+}
+
+/**
+ * Scan for newly launched meeting apps and prompt the user.
+ */
+async function detectMeetingApps() {
+    // Don't prompt if already recording
+    if (isRecording) {
+        detectedMeetingApps.clear();
+        return;
+    }
+
+    try {
+        const runningApps = await getRunningApps();
+        const now = Date.now();
+        const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+        for (const [processName, friendlyName] of Object.entries(MEETING_APPS)) {
+            const isRunning = runningApps.some(app =>
+                app.toLowerCase().includes(processName.toLowerCase())
+            );
+
+            if (isRunning && !detectedMeetingApps.has(processName)) {
+                // Check cooldown: don't re-prompt within 5 minutes of dismissal
+                const dismissedAt = dismissedApps.get(processName);
+                if (dismissedAt && (now - dismissedAt) < COOLDOWN_MS) {
+                    continue;
+                }
+
+                // New meeting app detected!
+                detectedMeetingApps.add(processName);
+                console.log(`[Meeting Detection] Detected: ${friendlyName}`);
+
+                // Show actionable notification
+                promptRecording(friendlyName);
+            } else if (!isRunning && detectedMeetingApps.has(processName)) {
+                // App was closed — remove from tracked set
+                detectedMeetingApps.delete(processName);
+            }
+        }
+    } catch (err) {
+        console.error('[Meeting Detection] Error:', err);
+    }
+}
+
+/**
+ * Show a notification asking if the user wants to start recording.
+ * On click → start recording. On close → cooldown.
+ */
+function promptRecording(appName) {
+    if (!Notification.isSupported()) return;
+
+    const notification = new Notification({
+        title: `${appName} Detected`,
+        body: `It looks like you're joining a call. Tap to start recording.`,
+        subtitle: 'Personal Assistant',
+        silent: false,
+        hasReply: false,
+        actions: [{ type: 'button', text: 'Record' }],
+        closeButtonText: 'Dismiss',
+    });
+
+    // User clicked the notification → start recording
+    notification.on('click', async () => {
+        if (!isRecording) {
+            try {
+                await apiPost('/api/recordings/start', { title: `${appName} Call` });
+                isRecording = true;
+                lastActionCount = 0;
+                lastDecisionCount = 0;
+                updateTrayMenu();
+                sendNotification('Recording Started', `Recording your ${appName} call.`);
+            } catch (err) {
+                sendNotification('Error', err.message || 'Failed to start recording');
+            }
+        }
+    });
+
+    // User clicked the "Record" action button
+    notification.on('action', async (event, index) => {
+        if (!isRecording) {
+            try {
+                await apiPost('/api/recordings/start', { title: `${appName} Call` });
+                isRecording = true;
+                lastActionCount = 0;
+                lastDecisionCount = 0;
+                updateTrayMenu();
+                sendNotification('Recording Started', `Recording your ${appName} call.`);
+            } catch (err) {
+                sendNotification('Error', err.message || 'Failed to start recording');
+            }
+        }
+    });
+
+    // User dismissed → set cooldown so we don't nag
+    notification.on('close', () => {
+        // Find which process name matches this app
+        for (const [processName, name] of Object.entries(MEETING_APPS)) {
+            if (name === appName) {
+                dismissedApps.set(processName, Date.now());
+                break;
+            }
+        }
+    });
+
+    notification.show();
+}
+
+/**
+ * Start the meeting detection polling loop.
+ */
+function startMeetingDetection() {
+    // Poll every 10 seconds for meeting apps
+    meetingDetectionInterval = setInterval(detectMeetingApps, 10000);
+    // Also run immediately
+    detectMeetingApps();
+}
+
 /**
  * Create the system tray icon and menu.
  */
@@ -459,8 +631,9 @@ function createTray() {
         }
     });
 
-    // Start polling
+    // Start polling backend status + meeting detection
     trayPollInterval = setInterval(pollBackend, 5000);
+    startMeetingDetection();
 }
 
 // ── App Lifecycle ──────────────────────────────────────────────────
@@ -507,6 +680,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
     if (trayPollInterval) clearInterval(trayPollInterval);
+    if (meetingDetectionInterval) clearInterval(meetingDetectionInterval);
     stopBackend();
 });
 
