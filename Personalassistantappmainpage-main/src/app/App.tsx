@@ -7,6 +7,7 @@ import { PeopleView } from './components/PeopleView';
 import { JournalInterface } from './components/JournalInterface';
 import { SettingsPanel } from './components/SettingsPanel';
 import { CalendarEventsPanel } from './components/CalendarEventsPanel';
+import { OnboardingWizard } from './components/OnboardingWizard';
 import { Mic, History, BookOpen, Settings, Loader2, Users, Calendar } from 'lucide-react';
 import { toast } from 'sonner';
 import { Toaster } from './components/ui/sonner';
@@ -36,6 +37,9 @@ export default function App() {
   const [isLoadingJournal, setIsLoadingJournal] = useState(true);
   const [activeTab, setActiveTab] = useState('record');
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    return !localStorage.getItem('onboarding_complete');
+  });
 
   useEffect(() => {
     loadMeetings();
@@ -204,6 +208,15 @@ export default function App() {
       throw error;
     }
   };
+
+  if (showOnboarding) {
+    return (
+      <OnboardingWizard onComplete={() => {
+        localStorage.setItem('onboarding_complete', 'true');
+        setShowOnboarding(false);
+      }} />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#111] dark">
