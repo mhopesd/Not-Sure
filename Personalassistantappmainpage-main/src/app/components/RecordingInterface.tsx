@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Mic, Square, Settings2, Sparkles } from 'lucide-react';
+import { Mic, Square, Settings2, Sparkles, CheckCircle2, Lightbulb, Zap } from 'lucide-react';
 import { MicrophoneSelector } from './MicrophoneSelector';
 import { ProcessingProgress } from './ProcessingProgress';
 import { getApiUrl, getApiHeaders } from '../config/api';
@@ -17,7 +17,16 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
   const [selectedDevice, setSelectedDevice] = useState<string>('microphone');
   const [error, setError] = useState<string | null>(null);
   const [scratchpad, setScratchpad] = useState('');
-  const [liveInsights, setLiveInsights] = useState<{ key_points: string[]; topic: string } | null>(null);
+  const [liveInsights, setLiveInsights] = useState<{
+    key_points: string[];
+    topic: string;
+    meeting_type?: string;
+    confidence?: number;
+    action_items?: { text: string; assignee: string | null }[];
+    decisions?: string[];
+    sentiment?: string;
+    suggested_questions?: string[];
+  } | null>(null);
 
   const durationIntervalRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -259,27 +268,95 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
 
           {/* Live Insights Panel */}
           {liveInsights && liveInsights.key_points && liveInsights.key_points.length > 0 && (
-            <div className="mb-6 p-4 bg-[#2774AE]/10 border border-[#2774AE]/20 rounded-xl">
-              <div className="flex items-center gap-2 mb-3">
+            <div className="mb-6 p-4 bg-[#2774AE]/10 border border-[#2774AE]/20 rounded-xl space-y-4">
+              {/* Header row: title + meeting type badge + sentiment */}
+              <div className="flex items-center gap-2 flex-wrap">
                 <Sparkles className="w-4 h-4 text-[#FFD100]" />
                 <span className="text-sm font-semibold text-white">Live Insights</span>
+                {liveInsights.meeting_type && (
+                  <span className="text-xs font-medium text-[#2774AE] bg-[#2774AE]/15 px-2 py-0.5 rounded-full capitalize">
+                    {liveInsights.meeting_type.replace('_', ' ')}
+                  </span>
+                )}
                 {liveInsights.topic && (
                   <span className="text-xs text-[#FFD100] bg-[#FFD100]/10 px-2 py-0.5 rounded">
                     {liveInsights.topic}
                   </span>
                 )}
+                {liveInsights.sentiment && liveInsights.sentiment !== 'neutral' && (
+                  <span className="ml-auto text-xs text-gray-400 capitalize">
+                    {liveInsights.sentiment === 'productive' ? '🟢' :
+                      liveInsights.sentiment === 'tense' ? '🔴' :
+                        liveInsights.sentiment === 'energetic' ? '⚡' :
+                          liveInsights.sentiment === 'confused' ? '🟡' : '💬'}
+                    {' '}{liveInsights.sentiment}
+                  </span>
+                )}
               </div>
-              <ul className="space-y-2">
+
+              {/* Key points */}
+              <ul className="space-y-1.5">
                 {liveInsights.key_points.map((point, idx) => (
-                  <li
-                    key={idx}
-                    className="flex items-start gap-2 text-sm text-gray-300 animate-fadeIn"
-                  >
+                  <li key={idx} className="flex items-start gap-2 text-sm text-gray-300">
                     <span className="text-[#FFD100] mt-0.5">•</span>
                     <span>{point}</span>
                   </li>
                 ))}
               </ul>
+
+              {/* Action items */}
+              {liveInsights.action_items && liveInsights.action_items.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                    <span className="text-xs font-medium text-green-400 uppercase tracking-wide">Action Items</span>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {liveInsights.action_items.map((item, idx) => (
+                      <li key={idx} className="flex items-start gap-2 text-sm text-gray-300">
+                        <span className="text-green-400 mt-0.5">☐</span>
+                        <span>
+                          {item.text}
+                          {item.assignee && (
+                            <span className="ml-1 text-xs text-[#2774AE] bg-[#2774AE]/10 px-1.5 py-0.5 rounded">{item.assignee}</span>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Decisions */}
+              {liveInsights.decisions && liveInsights.decisions.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <Zap className="w-3.5 h-3.5 text-[#FFD100]" />
+                    <span className="text-xs font-medium text-[#FFD100] uppercase tracking-wide">Decisions</span>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {liveInsights.decisions.map((decision, idx) => (
+                      <li key={idx} className="flex items-start gap-2 text-sm text-gray-300">
+                        <span className="text-[#FFD100] mt-0.5">✓</span>
+                        <span>{decision}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Suggested questions */}
+              {liveInsights.suggested_questions && liveInsights.suggested_questions.length > 0 && (
+                <div className="pt-2 border-t border-white/5">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <Lightbulb className="w-3.5 h-3.5 text-blue-400" />
+                    <span className="text-xs font-medium text-blue-400 uppercase tracking-wide">Try Asking</span>
+                  </div>
+                  {liveInsights.suggested_questions.map((q, idx) => (
+                    <p key={idx} className="text-sm text-gray-400 italic">"{q}"</p>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

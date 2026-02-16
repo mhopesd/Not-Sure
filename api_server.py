@@ -214,14 +214,41 @@ async def stop_recording():
 
 @app.get("/api/recordings/status")
 async def recording_status():
-    """Get current recording status"""
+    """Get current recording status with live meeting intelligence"""
     if not backend_app:
         raise HTTPException(status_code=503, detail="Backend not initialized")
     
+    duration = 0
+    if backend_app.is_recording and backend_app.recording_start_time:
+        from datetime import datetime as dt
+        duration = int((dt.now() - backend_app.recording_start_time).total_seconds())
+    
+    insights = getattr(backend_app, 'live_insights', {})
     return {
         "is_recording": backend_app.is_recording,
-        "duration": 0  # TODO: Track actual duration
+        "duration": duration,
+        "meeting_type": insights.get("meeting_type"),
+        "topic": insights.get("topic", ""),
+        "sentiment": insights.get("sentiment", "neutral"),
     }
+
+
+@app.get("/api/recordings/insights")
+async def recording_insights():
+    """Get full live insights snapshot (meeting type, action items, decisions, etc.)"""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    
+    return getattr(backend_app, 'live_insights', {
+        "meeting_type": None,
+        "confidence": 0,
+        "key_points": [],
+        "action_items": [],
+        "decisions": [],
+        "sentiment": "neutral",
+        "suggested_questions": [],
+        "topic": ""
+    })
 
 # ==================== MEETINGS ====================
 

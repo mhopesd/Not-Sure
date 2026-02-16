@@ -65,6 +65,16 @@ class EnhancedAudioApp:
         self.level_callback = level_callback
         self.summary_callback = None  # Set by API server for live summary streaming
         self.live_transcript_text = ""  # Accumulated transcript for live summary
+        self.live_insights = {           # Running insights state
+            "meeting_type": None,
+            "confidence": 0,
+            "key_points": [],
+            "action_items": [],
+            "decisions": [],
+            "sentiment": "neutral",
+            "suggested_questions": [],
+            "topic": ""
+        }
         
         self.detect_devices()
         
@@ -414,9 +424,25 @@ class EnhancedAudioApp:
         logger.info(f"Live transcription loop ended. Total transcriptions: {transcribe_count}")
 
     def live_summary_loop(self):
-        """Stream progressive key points during recording via Gemini."""
-        logger.info("Live summary loop started.")
+        """Real-time conversation intelligence via Gemini.
+        
+        Detects meeting type, extracts action items, decisions, sentiment,
+        and suggests contextual follow-up questions every 30 seconds.
+        """
+        logger.info("Live insights loop started.")
         summary_count = 0
+        
+        # Reset insights for this recording session
+        self.live_insights = {
+            "meeting_type": None,
+            "confidence": 0,
+            "key_points": [],
+            "action_items": [],
+            "decisions": [],
+            "sentiment": "neutral",
+            "suggested_questions": [],
+            "topic": ""
+        }
         
         # Don't start until we have a reasonable amount of transcript
         time.sleep(30)
@@ -429,24 +455,46 @@ class EnhancedAudioApp:
             
             # Check for Gemini availability
             if not GOOGLE_GENAI_AVAILABLE:
-                logger.debug("Live summary: Gemini not available")
+                logger.debug("Live insights: Gemini not available")
                 break
             
             raw_key = self.config['API_KEYS'].get('gemini', '')
             key = raw_key.strip().replace('"', '').replace("'", "")
             if not key:
-                logger.debug("Live summary: No Gemini API key")
+                logger.debug("Live insights: No Gemini API key")
                 break
             
             try:
                 client = genai.Client(api_key=key)
                 selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
                 
-                prompt = f"""Extract 3-5 key points from the meeting transcript so far. Be concise.
-                Return a JSON object: {{"key_points": ["point 1", "point 2", ...], "topic": "Main topic"}}
+                # Build context from previous insights so Gemini can accumulate
+                prev_context = ""
+                if summary_count > 0:
+                    prev_context = f"""\nPREVIOUS INSIGHTS (build on these, don't repeat):
+- Meeting type: {self.live_insights.get('meeting_type', 'unknown')}
+- Topic: {self.live_insights.get('topic', 'unknown')}
+- Action items so far: {json.dumps(self.live_insights.get('action_items', []))}
+- Decisions so far: {json.dumps(self.live_insights.get('decisions', []))}
+"""
                 
-                TRANSCRIPT SO FAR:
-                {self.live_transcript_text[-3000:]}"""  # Last 3000 chars to stay within limits
+                prompt = f"""You are a real-time meeting analyst. Analyze this live conversation transcript and return structured insights.
+
+Rules:
+- meeting_type: classify as one of: standup, one_on_one, brainstorm, interview, all_hands, presentation, planning, retrospective, client_call, casual, other
+- confidence: 0.0 to 1.0 for meeting_type classification
+- key_points: 3-5 most important points discussed so far (concise bullet style)
+- action_items: things someone committed to do, with "text" and "assignee" (use speaker label if available, else null)
+- decisions: concrete decisions that were made (strings)
+- sentiment: overall tone — one of: productive, tense, casual, confused, energetic, neutral
+- suggested_questions: 1-2 contextual questions relevant to this meeting type that could move the conversation forward
+- topic: concise main topic/subject of the meeting
+
+Return ONLY a JSON object with these exact keys. For action_items, each item is {{"text": "...", "assignee": "..." or null}}.
+Include ALL action items and decisions from previous insights plus any new ones (deduplicated).
+{prev_context}
+TRANSCRIPT (latest):
+{self.live_transcript_text[-3000:]}"""
                 
                 response = client.models.generate_content(
                     model=selected_model,
@@ -460,21 +508,32 @@ class EnhancedAudioApp:
                 
                 data = json.loads(text)
                 summary_count += 1
-                logger.info(f"Live summary #{summary_count}: {len(data.get('key_points', []))} points")
+                
+                # Update running insights state
+                self.live_insights.update(data)
+                
+                mt = data.get('meeting_type', '?')
+                n_actions = len(data.get('action_items', []))
+                n_decisions = len(data.get('decisions', []))
+                logger.info(
+                    f"Live insights #{summary_count}: type={mt}, "
+                    f"actions={n_actions}, decisions={n_decisions}, "
+                    f"sentiment={data.get('sentiment', '?')}"
+                )
                 
                 if self.summary_callback:
                     self.summary_callback(data)
                     
             except Exception as e:
-                logger.debug(f"Live summary error (will retry): {e}")
+                logger.debug(f"Live insights error (will retry): {e}")
             
-            # Wait 30 seconds between summary updates
+            # Wait 30 seconds between insight updates
             for _ in range(30):
                 if not self.is_recording:
                     break
                 time.sleep(1)
         
-        logger.info(f"Live summary loop ended. Total summaries: {summary_count}")
+        logger.info(f"Live insights loop ended. Total updates: {summary_count}")
 
     def process_audio(self):
         logger.info("Processing logic started.")
