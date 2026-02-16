@@ -63,6 +63,8 @@ class EnhancedAudioApp:
         self.result_callback = result_callback
         self.transcript_callback = transcript_callback
         self.level_callback = level_callback
+        self.summary_callback = None  # Set by API server for live summary streaming
+        self.live_transcript_text = ""  # Accumulated transcript for live summary
         
         self.detect_devices()
         
@@ -219,11 +221,16 @@ class EnhancedAudioApp:
 
         self.is_recording = True
         
+        self.live_transcript_text = ""  # Reset live transcript accumulator
+        
         self.recording_thread = threading.Thread(target=self.record_audio)
         self.recording_thread.start()
         
         self.transcription_thread = threading.Thread(target=self.live_transcribe_loop)
         self.transcription_thread.start()
+        
+        self.summary_thread = threading.Thread(target=self.live_summary_loop)
+        self.summary_thread.start()
 
         self.recording_start_time = datetime.now()
         self.update_status("● Initializing...")
@@ -248,6 +255,8 @@ class EnhancedAudioApp:
                 self.recording_thread.join(timeout=3.0)
             if self.transcription_thread:
                 self.transcription_thread.join(timeout=3.0)
+            if hasattr(self, 'summary_thread') and self.summary_thread:
+                self.summary_thread.join(timeout=3.0)
             self.process_audio()
         finally:
             self._processing_audio = False
@@ -388,6 +397,7 @@ class EnhancedAudioApp:
 
                 if text and self.transcript_callback:
                     self.transcript_callback(text)
+                    self.live_transcript_text = text  # Update accumulated transcript
                 elif not text and self.transcript_callback:
                     self.transcript_callback("(Listening... no speech detected yet)")
 
@@ -402,6 +412,69 @@ class EnhancedAudioApp:
                 logger.debug(f"Live transcribe error (will retry): {e}")
 
         logger.info(f"Live transcription loop ended. Total transcriptions: {transcribe_count}")
+
+    def live_summary_loop(self):
+        """Stream progressive key points during recording via Gemini."""
+        logger.info("Live summary loop started.")
+        summary_count = 0
+        
+        # Don't start until we have a reasonable amount of transcript
+        time.sleep(30)
+        
+        while self.is_recording:
+            # Only proceed if we have transcript text
+            if not self.live_transcript_text or len(self.live_transcript_text.strip()) < 50:
+                time.sleep(10)
+                continue
+            
+            # Check for Gemini availability
+            if not GOOGLE_GENAI_AVAILABLE:
+                logger.debug("Live summary: Gemini not available")
+                break
+            
+            raw_key = self.config['API_KEYS'].get('gemini', '')
+            key = raw_key.strip().replace('"', '').replace("'", "")
+            if not key:
+                logger.debug("Live summary: No Gemini API key")
+                break
+            
+            try:
+                client = genai.Client(api_key=key)
+                selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
+                
+                prompt = f"""Extract 3-5 key points from the meeting transcript so far. Be concise.
+                Return a JSON object: {{"key_points": ["point 1", "point 2", ...], "topic": "Main topic"}}
+                
+                TRANSCRIPT SO FAR:
+                {self.live_transcript_text[-3000:]}"""  # Last 3000 chars to stay within limits
+                
+                response = client.models.generate_content(
+                    model=selected_model,
+                    contents=[prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                
+                text = response.text.strip()
+                if text.startswith("```json"): text = text[7:-3]
+                if text.startswith("```"): text = text[3:-3]
+                
+                data = json.loads(text)
+                summary_count += 1
+                logger.info(f"Live summary #{summary_count}: {len(data.get('key_points', []))} points")
+                
+                if self.summary_callback:
+                    self.summary_callback(data)
+                    
+            except Exception as e:
+                logger.debug(f"Live summary error (will retry): {e}")
+            
+            # Wait 30 seconds between summary updates
+            for _ in range(30):
+                if not self.is_recording:
+                    break
+                time.sleep(1)
+        
+        logger.info(f"Live summary loop ended. Total summaries: {summary_count}")
 
     def process_audio(self):
         logger.info("Processing logic started.")
@@ -553,8 +626,9 @@ class EnhancedAudioApp:
             
             SPEAKER DIARIZATION:
             - Attempt to identify distinct speakers based on the audio (if provided) or text patterns.
-            - Assign them labels like "Speaker 1", "Speaker A", or names if mentioned.
+            - Assign them labels like "Speaker 1", "Speaker A", or names if mentioned in conversation.
             - Estimate the total number of distinct speakers.
+            - Produce a diarized_transcript: an array of objects, each with speaker, timestamp, and text.
 
             Output a JSON object with this EXACT structure:
             {
@@ -562,8 +636,12 @@ class EnhancedAudioApp:
                 "executive_summary": "High-level summary.",
                 "speaker_info": {
                     "count": 2,
-                    "list": ["Speaker 1 (Male)", "Speaker 2 (Female)"]
+                    "list": ["Speaker 1", "Speaker 2"]
                 },
+                "diarized_transcript": [
+                    {"speaker": "Speaker 1", "timestamp": "00:00-00:15", "text": "What they said"},
+                    {"speaker": "Speaker 2", "timestamp": "00:15-00:30", "text": "Their response"}
+                ],
                 "highlights": ["Point 1", "Point 2"],
                 "full_summary_sections": [{"header": "Topic", "content": "Details", "quote": "Quote", "attribution": "Speaker 1"}],
                 "tasks": [{"description": "Task", "assignee": "Name", "due_date": "Date"}]
@@ -587,6 +665,21 @@ class EnhancedAudioApp:
             data = json.loads(text)
             data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
             data["transcript"] = transcript
+            
+            # Build enhanced transcript from diarized data if available
+            if "diarized_transcript" in data and isinstance(data["diarized_transcript"], list) and len(data["diarized_transcript"]) > 0:
+                diarized_lines = []
+                for seg in data["diarized_transcript"]:
+                    speaker = seg.get("speaker", "Speaker")
+                    ts = seg.get("timestamp", "")
+                    txt = seg.get("text", "").strip()
+                    if ts:
+                        diarized_lines.append(f"[{ts}] {speaker}: {txt}")
+                    else:
+                        diarized_lines.append(f"{speaker}: {txt}")
+                data["diarized_transcript_text"] = "\n".join(diarized_lines)
+                logger.info(f"Diarized transcript: {len(data['diarized_transcript'])} segments, {len(data.get('speaker_info', {}).get('list', []))} speakers")
+            
             return data
         except Exception as e:
             logger.error(f"Gemini API Error: {e}")

@@ -1,8 +1,8 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { Loader2, Calendar, Clock, Users, Sparkles, Tag, MoreHorizontal } from 'lucide-react';
+import { Loader2, Calendar, Clock, Users, Sparkles, Tag, MoreHorizontal, Search } from 'lucide-react';
 import { format, isToday, isTomorrow, isThisWeek, isThisMonth, parseISO } from 'date-fns';
 import { TagFilter } from './TagFilter';
 
@@ -77,6 +77,9 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
   const [expandedMeetingId, setExpandedMeetingId] = useState<string | null>(null);
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[] | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
 
   // Extract all unique tags from meetings
   const availableTags = useMemo(() => {
@@ -121,6 +124,33 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
     );
   };
 
+  // Debounced search
+  useEffect(() => {
+    if (!searchQuery || searchQuery.length < 2) {
+      setSearchResults(null);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const response = await fetch(
+          `http://localhost:8000/api/meetings/search?q=${encodeURIComponent(searchQuery)}`
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setSearchResults(data.results);
+        }
+      } catch (err) {
+        console.error('Search failed:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -145,17 +175,64 @@ export function MeetingHistory({ meetings, onAnalyzeMeeting, onMeetingClick }: M
 
   return (
     <div className="space-y-6">
-      {/* Tag Filter */}
-      <div className="flex items-center justify-between">
-        <TagFilter
-          availableTags={availableTags}
-          selectedTags={selectedTags}
-          onTagToggle={handleTagToggle}
-        />
-        <div className="text-sm text-gray-400">
-          {filteredMeetings.length} meeting{filteredMeetings.length !== 1 ? 's' : ''}
+      {/* Search + Tag Filter */}
+      <div className="space-y-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search meetings, transcripts, summaries..."
+            className="w-full bg-white/5 border border-white/10 rounded-lg pl-10 pr-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-[#2774AE] transition-colors text-sm"
+          />
+          {isSearching && (
+            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#2774AE] animate-spin" />
+          )}
+        </div>
+
+        <div className="flex items-center justify-between">
+          <TagFilter
+            availableTags={availableTags}
+            selectedTags={selectedTags}
+            onTagToggle={handleTagToggle}
+          />
+          <div className="text-sm text-gray-400">
+            {searchResults ? `${searchResults.length} result${searchResults.length !== 1 ? 's' : ''}` : `${filteredMeetings.length} meeting${filteredMeetings.length !== 1 ? 's' : ''}`}
+          </div>
         </div>
       </div>
+
+      {/* Search Results */}
+      {searchResults && searchResults.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium text-gray-400 mb-3">Search Results</h3>
+          {searchResults.map((result: any) => (
+            <div
+              key={result.meeting_id}
+              onClick={() => onMeetingClick?.(result.meeting_id)}
+              className="p-4 bg-white/5 hover:bg-white/10 rounded-lg cursor-pointer transition-colors border border-white/5"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-white font-medium">{result.title}</h4>
+                <span className="text-xs text-gray-500">{result.date}</span>
+              </div>
+              {result.matches.map((match: any, idx: number) => (
+                <div key={idx} className="text-sm mb-1">
+                  <span className="text-xs text-[#FFD100] uppercase mr-2">{match.field}</span>
+                  <span className="text-gray-400">{match.snippet}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {searchResults && searchResults.length === 0 && searchQuery.length >= 2 && (
+        <div className="text-center py-8 text-gray-500">
+          No results found for "{searchQuery}"
+        </div>
+      )}
 
       {/* Grouped Meetings */}
       {groupedMeetings.map((group) => (

@@ -114,6 +114,14 @@ async def broadcast_level(level: float):
         except:
             pass
 
+async def broadcast_live_summary(data: dict):
+    """Send live summary updates to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "live_summary", "data": data})
+        except:
+            pass
+
 # Thread-safe status callback wrapper
 def status_callback(message: str):
     asyncio.create_task(broadcast_status(message))
@@ -124,11 +132,15 @@ def transcript_callback(text: str):
 def level_callback(level: float):
     asyncio.create_task(broadcast_level(level))
 
+def live_summary_callback(data: dict):
+    asyncio.create_task(broadcast_live_summary(data))
+
 @app.on_event("startup")
 async def startup():
     """Initialize the backend on server start"""
     global backend_app, oauth_manager
     backend_app = EnhancedAudioApp()
+    backend_app.summary_callback = live_summary_callback
     oauth_manager = OAuthManager()
     print("✓ Backend initialized")
     print("✓ OAuth manager initialized")
@@ -285,6 +297,8 @@ async def get_meeting(meeting_id: str):
             "duration": entry.get("duration", entry.get("duration_seconds", 0)),
             "speakers": speakers,
             "transcript": entry.get("transcript", ""),
+            "diarized_transcript": entry.get("diarized_transcript", []),
+            "diarized_transcript_text": entry.get("diarized_transcript_text", ""),
             "executive_summary": entry.get("executive_summary", ""),
             "highlights": entry.get("highlights", []),
             "full_summary_sections": entry.get("full_summary_sections", []),
@@ -340,6 +354,78 @@ async def get_all_tags():
         tags = {"Follow-up", "Important", "Meeting Notes"}
     
     return {"tags": sorted(list(tags))}
+
+# ==================== SEARCH ====================
+
+@app.get("/api/meetings/search")
+async def search_meetings(q: str = "", fields: str = "title,transcript,executive_summary,speakers"):
+    """Full-text search across all meetings"""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    
+    if not q or len(q.strip()) < 2:
+        return {"results": [], "query": q}
+    
+    query = q.strip().lower()
+    search_fields = [f.strip() for f in fields.split(",")]
+    history = backend_app.chat_history or []
+    results = []
+    
+    for idx, entry in enumerate(history):
+        if not isinstance(entry, dict):
+            continue
+        
+        matches = []
+        
+        # Search in text fields
+        for field in search_fields:
+            value = ""
+            if field == "speakers":
+                speaker_info = entry.get("speaker_info", {})
+                if isinstance(speaker_info, dict):
+                    value = " ".join(speaker_info.get("list", []))
+                elif isinstance(speaker_info, list):
+                    value = " ".join(str(s) for s in speaker_info)
+            elif field == "highlights":
+                value = " ".join(entry.get("highlights", []))
+            else:
+                value = str(entry.get(field, ""))
+            
+            if query in value.lower():
+                # Extract a snippet around the match
+                lower_val = value.lower()
+                match_pos = lower_val.find(query)
+                start = max(0, match_pos - 60)
+                end = min(len(value), match_pos + len(query) + 60)
+                snippet = value[start:end]
+                if start > 0:
+                    snippet = "..." + snippet
+                if end < len(value):
+                    snippet = snippet + "..."
+                
+                matches.append({
+                    "field": field,
+                    "snippet": snippet
+                })
+        
+        if matches:
+            # Get speaker info
+            speaker_info = entry.get("speaker_info", {})
+            speakers = []
+            if isinstance(speaker_info, dict):
+                speakers = speaker_info.get("list", [])
+            elif isinstance(speaker_info, list):
+                speakers = speaker_info
+            
+            results.append({
+                "meeting_id": str(idx),
+                "title": entry.get("title", f"Meeting {idx + 1}"),
+                "date": entry.get("timestamp", entry.get("date", "")),
+                "speakers": speakers,
+                "matches": matches
+            })
+    
+    return {"results": results, "query": q, "total": len(results)}
 
 # ==================== TASKS ====================
 

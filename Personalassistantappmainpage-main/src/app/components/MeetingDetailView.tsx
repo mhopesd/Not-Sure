@@ -3,6 +3,12 @@ import { ArrowLeft, Copy, Check, Plus, MoreHorizontal, Tag, Mail, Calendar, Send
 import { getApiUrl, getApiHeaders } from '../config/api';
 import { toast } from 'sonner';
 
+interface DiarizedSegment {
+    speaker: string;
+    timestamp: string;
+    text: string;
+}
+
 interface Meeting {
     id: string;
     title: string;
@@ -10,6 +16,8 @@ interface Meeting {
     duration: number | string;
     speakers: string[];
     transcript: string;
+    diarized_transcript: DiarizedSegment[];
+    diarized_transcript_text: string;
     executive_summary: string;
     highlights: string[];
     tasks: any[];
@@ -426,15 +434,54 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
                     <div>
                         <div className="flex items-center gap-4 mb-6">
                             <button
-                                onClick={() => copyToClipboard(meeting.transcript, 'Transcript')}
+                                onClick={() => copyToClipboard(
+                                    meeting.diarized_transcript_text || meeting.transcript,
+                                    'Transcript'
+                                )}
                                 className="text-sm text-gray-400 hover:text-white flex items-center gap-1"
                             >
                                 {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                                 Copy transcript
                             </button>
+                            {meeting.diarized_transcript && meeting.diarized_transcript.length > 0 && (
+                                <span className="text-xs text-[#FFD100] bg-[#FFD100]/10 px-2 py-1 rounded">
+                                    {meeting.speakers?.length || '?'} speakers identified
+                                </span>
+                            )}
                         </div>
 
-                        {meeting.transcript ? (
+                        {meeting.diarized_transcript && meeting.diarized_transcript.length > 0 ? (
+                            <div className="space-y-3">
+                                {meeting.diarized_transcript.map((seg: DiarizedSegment, idx: number) => {
+                                    // Color-code speakers using UCLA palette
+                                    const speakerColors = [
+                                        '#2774AE', '#FFD100', '#3B82F6', '#10B981',
+                                        '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'
+                                    ];
+                                    const speakerIndex = meeting.speakers?.indexOf(seg.speaker) ?? 0;
+                                    const color = speakerColors[Math.abs(speakerIndex) % speakerColors.length];
+
+                                    return (
+                                        <div key={idx} className="flex gap-3 group">
+                                            <div className="flex-shrink-0 w-24 text-right">
+                                                <span className="text-xs text-gray-500 font-mono">
+                                                    {seg.timestamp}
+                                                </span>
+                                            </div>
+                                            <div className="flex-1">
+                                                <span
+                                                    className="text-xs font-semibold mr-2"
+                                                    style={{ color }}
+                                                >
+                                                    {seg.speaker}
+                                                </span>
+                                                <span className="text-gray-300">{seg.text}</span>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : meeting.transcript ? (
                             <div className="prose prose-invert max-w-none">
                                 <p className="text-gray-300 leading-relaxed whitespace-pre-wrap">
                                     {meeting.transcript}

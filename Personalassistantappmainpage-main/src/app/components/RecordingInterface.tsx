@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Mic, Square, Settings2 } from 'lucide-react';
+import { Mic, Square, Settings2, Sparkles } from 'lucide-react';
 import { MicrophoneSelector } from './MicrophoneSelector';
 import { ProcessingProgress } from './ProcessingProgress';
 import { getApiUrl, getApiHeaders } from '../config/api';
@@ -17,6 +17,7 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
   const [selectedDevice, setSelectedDevice] = useState<string>('microphone');
   const [error, setError] = useState<string | null>(null);
   const [scratchpad, setScratchpad] = useState('');
+  const [liveInsights, setLiveInsights] = useState<{ key_points: string[]; topic: string } | null>(null);
 
   const durationIntervalRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -120,6 +121,11 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
         break;
       case 'audio_level':
         // Audio level for VU meter could be handled here
+        break;
+      case 'live_summary':
+        if (message.data) {
+          setLiveInsights(message.data);
+        }
         break;
       case 'status':
         if (message.status === 'processing') {
@@ -251,9 +257,35 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
             />
           </div>
 
+          {/* Live Insights Panel */}
+          {liveInsights && liveInsights.key_points && liveInsights.key_points.length > 0 && (
+            <div className="mb-6 p-4 bg-[#2774AE]/10 border border-[#2774AE]/20 rounded-xl">
+              <div className="flex items-center gap-2 mb-3">
+                <Sparkles className="w-4 h-4 text-[#FFD100]" />
+                <span className="text-sm font-semibold text-white">Live Insights</span>
+                {liveInsights.topic && (
+                  <span className="text-xs text-[#FFD100] bg-[#FFD100]/10 px-2 py-0.5 rounded">
+                    {liveInsights.topic}
+                  </span>
+                )}
+              </div>
+              <ul className="space-y-2">
+                {liveInsights.key_points.map((point, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-2 text-sm text-gray-300 animate-fadeIn"
+                  >
+                    <span className="text-[#FFD100] mt-0.5">•</span>
+                    <span>{point}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {/* Info message */}
           <div className="text-center text-gray-500 text-sm mb-6">
-            Transcript and summary will be generated once the meeting is over
+            {liveInsights ? 'Insights updating as the conversation continues...' : 'Transcript and summary will be generated once the meeting is over'}
           </div>
 
           {/* Recording controls - fixed at bottom */}
