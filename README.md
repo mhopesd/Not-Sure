@@ -30,7 +30,9 @@ The name "NotSure" comes from that feeling we all get — *"Wait, what did they 
 
 📅 **Integrates** — Optional Google and Microsoft calendar/email integration to keep everything connected
 
-🖥️ **Native App** — Runs as a macOS desktop application — click an icon, hit record, done
+🖥️ **Native Desktop App** — An Electron-based macOS application with a rich React frontend dashboard
+
+⚙️ **Menu Bar Integration** — Quick access recording controls directly from the macOS menu bar via `rumps`
 
 ## Privacy First
 
@@ -114,13 +116,15 @@ Then set `default_llm = ollama` in your `audio_config.ini`.
 ## Project Structure
 
 ```
-├── api_server.py          # FastAPI backend (REST + WebSocket)
+├── api_server.py          # FastAPI backend (REST + WebSocket endpoints)
 ├── backend.py             # Core logic: recording, transcription, summarization
-├── enhanced_recorder_v4.py # Audio capture engine
-├── integrations/          # Google & Microsoft calendar/email
-├── Personalassistantappmainpage-main/  # React frontend (Vite + TypeScript)
-├── desktop/               # Electron wrapper for native macOS app
-├── web_companion/         # Experimental web archive (Reflex)
+├── enhanced_recorder_v4.py# Audio capture engine
+├── menubar_app.py         # Standalone rumps macOS menu bar app for quick access
+├── integrations/          # Google & Microsoft calendar/email integrations
+├── desktop/               # Electron desktop wrapper (`main.js`, `build_app.sh`)
+│   └── frontend/          # Built React frontend output
+├── Personalassistantappmainpage-main/  # React frontend source (Vite + TypeScript)
+│   └── src/components/    # All UI sections (History, Recording, Journal, etc.)
 ├── audio_config.ini.example  # Template config (copy to audio_config.ini)
 └── setup.sh               # macOS dependency installer
 ```

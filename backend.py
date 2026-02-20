@@ -13,6 +13,7 @@ import time
 import shutil
 import subprocess
 import traceback
+import requests
 
 # Use centralized logging
 from app_logging import logger
@@ -25,6 +26,20 @@ try:
 except ImportError:
     GOOGLE_GENAI_AVAILABLE = False
     logger.warning("Google GenAI not installed (pip install google-genai).")
+
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    logger.warning("OpenAI not installed (pip install openai).")
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    logger.warning("Anthropic not installed (pip install anthropic).")
 
 import whisper
 
@@ -110,7 +125,10 @@ class EnhancedAudioApp:
         self.config['API_KEYS'] = {'openai': '', 'anthropic': '', 'gemini': ''}
         self.config['SETTINGS'] = {
             'history_directory': self.history_directory,
-            'default_llm': 'auto', 'ollama_model': 'llama3:8b'
+            'default_llm': 'auto',
+            'ollama_model': 'llama3:8b',
+            'openai_model': 'gpt-4o',
+            'anthropic_model': 'claude-sonnet-4-20250514'
         }
         try:
             if os.path.exists(self.config_file):
@@ -614,15 +632,16 @@ TRANSCRIPT (latest):
     def generate_summary(self, transcript, audio_path=None):
         llm = self.config['SETTINGS'].get('default_llm', 'ollama')
         logger.info(f"Summarizing with {llm}")
-        if llm == 'gemini': return self._summarize_with_gemini(transcript, audio_path)
-        return {
-            "title": f"Meeting {datetime.now().strftime('%b %d')}",
-            "date": datetime.now().strftime("%b %d at %I:%M %p"),
-            "executive_summary": "Summary requires Gemini API Key configuration.",
-            "full_summary": "Please configure audio_config.ini",
-            "tasks": [],
-            "transcript": transcript
-        }
+        if llm == 'gemini':
+            return self._summarize_with_gemini(transcript, audio_path)
+        elif llm == 'ollama':
+            return self._summarize_with_ollama(transcript, audio_path)
+        elif llm == 'openai':
+            return self._summarize_with_openai(transcript, audio_path)
+        elif llm == 'anthropic':
+            return self._summarize_with_anthropic(transcript, audio_path)
+        else:
+            return self.error_summary(f"Unsupported LLM: {llm}", transcript)
 
     def _summarize_with_gemini(self, transcript, audio_path=None):
         if not GOOGLE_GENAI_AVAILABLE: return self.error_summary("Google GenAI Lib Missing", transcript)
@@ -746,6 +765,261 @@ TRANSCRIPT (latest):
 
     def error_summary(self, error_msg, transcript):
         return {"title": "Error Processing", "executive_summary": error_msg, "full_summary": "", "tasks": [], "transcript": transcript}
+
+    def _summarize_with_ollama(self, transcript, audio_path=None):
+        """Summarize transcript using local Ollama LLM."""
+        # Health check - verify Ollama is running
+        try:
+            health_response = requests.get("http://localhost:11434/api/tags", timeout=5)
+            health_response.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            return self.error_summary("Ollama not running. Start with: ollama serve", transcript)
+        except requests.exceptions.Timeout:
+            return self.error_summary("Ollama health check timed out", transcript)
+        except Exception as e:
+            return self.error_summary(f"Ollama connection error: {str(e)}", transcript)
+
+        # Get model from config
+        model = self.config['SETTINGS'].get('ollama_model', 'llama3:8b')
+        logger.info(f"Using Ollama model: {model}")
+
+        # Build JSON-output prompt matching Gemini's structure
+        prompt = f"""You are an expert executive assistant. Analyze the following meeting transcript and return a structured JSON summary.
+
+Output ONLY a valid JSON object with this EXACT structure (no markdown, no code blocks):
+{{
+    "title": "Short descriptive title for the meeting",
+    "executive_summary": "2-3 sentence high-level summary of what was discussed",
+    "speaker_info": {{
+        "count": 1,
+        "list": ["Speaker 1"]
+    }},
+    "highlights": ["Key point 1", "Key point 2", "Key point 3"],
+    "full_summary_sections": [
+        {{"header": "Main Topic", "content": "Details about this topic"}}
+    ],
+    "tasks": [
+        {{"description": "Action item description", "assignee": "Person name or null", "due_date": "Date or null"}}
+    ]
+}}
+
+TRANSCRIPT:
+{transcript}
+
+JSON RESPONSE:"""
+
+        try:
+            self.update_status("AI Summarizing (Ollama)...")
+
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json"
+            }
+
+            response = requests.post(
+                "http://localhost:11434/api/generate",
+                json=payload,
+                timeout=120
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            text = result.get("response", "").strip()
+            logger.info(f"Ollama response length: {len(text)} chars")
+
+            # Handle potential markdown wrappers
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+            # Parse JSON response
+            data = json.loads(text)
+
+            # Add standard fields
+            data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
+            data["transcript"] = transcript
+
+            # Ensure required fields exist
+            if "tasks" not in data:
+                data["tasks"] = []
+            if "highlights" not in data:
+                data["highlights"] = []
+            if "full_summary_sections" not in data:
+                data["full_summary_sections"] = []
+
+            logger.info(f"Ollama summary generated: {data.get('title', 'No title')}")
+            return data
+
+        except requests.exceptions.Timeout:
+            return self.error_summary("Ollama request timed out (model may be loading)", transcript)
+        except json.JSONDecodeError as e:
+            logger.error(f"Ollama JSON parse error: {e}, response: {text[:500] if text else 'empty'}")
+            return self.error_summary(f"Ollama returned invalid JSON: {str(e)}", transcript)
+        except Exception as e:
+            logger.error(f"Ollama API error: {e}")
+            return self.error_summary(f"Ollama error: {str(e)}", transcript)
+
+    def _summarize_with_openai(self, transcript, audio_path=None):
+        """Summarize transcript using OpenAI API."""
+        if not OPENAI_AVAILABLE:
+            return self.error_summary("OpenAI library not installed (pip install openai)", transcript)
+
+        raw_key = self.config['API_KEYS'].get('openai', '')
+        key = raw_key.strip().replace('"', '').replace("'", "")
+        if not key:
+            return self.error_summary("OpenAI API Key Missing", transcript)
+
+        model = self.config['SETTINGS'].get('openai_model', 'gpt-4o')
+        logger.info(f"Using OpenAI model: {model}")
+
+        prompt = """You are an expert executive assistant. Analyze the following meeting transcript and return a structured JSON summary.
+
+Output ONLY a valid JSON object with this EXACT structure:
+{
+    "title": "Short descriptive title for the meeting",
+    "executive_summary": "2-3 sentence high-level summary of what was discussed",
+    "speaker_info": {
+        "count": 1,
+        "list": ["Speaker 1"]
+    },
+    "highlights": ["Key point 1", "Key point 2", "Key point 3"],
+    "full_summary_sections": [
+        {"header": "Main Topic", "content": "Details about this topic"}
+    ],
+    "tasks": [
+        {"description": "Action item description", "assignee": "Person name or null", "due_date": "Date or null"}
+    ]
+}
+
+TRANSCRIPT:
+""" + transcript
+
+        try:
+            self.update_status("AI Summarizing (OpenAI)...")
+            client = openai.OpenAI(api_key=key)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+
+            text = response.choices[0].message.content.strip()
+            logger.info(f"OpenAI response length: {len(text)} chars")
+
+            # Handle potential markdown wrappers
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+            data = json.loads(text)
+            data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
+            data["transcript"] = transcript
+
+            if "tasks" not in data:
+                data["tasks"] = []
+            if "highlights" not in data:
+                data["highlights"] = []
+            if "full_summary_sections" not in data:
+                data["full_summary_sections"] = []
+
+            logger.info(f"OpenAI summary generated: {data.get('title', 'No title')}")
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"OpenAI JSON parse error: {e}")
+            return self.error_summary(f"OpenAI returned invalid JSON: {str(e)}", transcript)
+        except Exception as e:
+            logger.error(f"OpenAI API error: {e}")
+            return self.error_summary(f"OpenAI error: {str(e)}", transcript)
+
+    def _summarize_with_anthropic(self, transcript, audio_path=None):
+        """Summarize transcript using Anthropic API."""
+        if not ANTHROPIC_AVAILABLE:
+            return self.error_summary("Anthropic library not installed (pip install anthropic)", transcript)
+
+        raw_key = self.config['API_KEYS'].get('anthropic', '')
+        key = raw_key.strip().replace('"', '').replace("'", "")
+        if not key:
+            return self.error_summary("Anthropic API Key Missing", transcript)
+
+        model = self.config['SETTINGS'].get('anthropic_model', 'claude-sonnet-4-20250514')
+        logger.info(f"Using Anthropic model: {model}")
+
+        prompt = """You are an expert executive assistant. Analyze the following meeting transcript and return a structured JSON summary.
+
+Output ONLY a valid JSON object with this EXACT structure (no markdown, no code blocks):
+{
+    "title": "Short descriptive title for the meeting",
+    "executive_summary": "2-3 sentence high-level summary of what was discussed",
+    "speaker_info": {
+        "count": 1,
+        "list": ["Speaker 1"]
+    },
+    "highlights": ["Key point 1", "Key point 2", "Key point 3"],
+    "full_summary_sections": [
+        {"header": "Main Topic", "content": "Details about this topic"}
+    ],
+    "tasks": [
+        {"description": "Action item description", "assignee": "Person name or null", "due_date": "Date or null"}
+    ]
+}
+
+TRANSCRIPT:
+""" + transcript
+
+        try:
+            self.update_status("AI Summarizing (Anthropic)...")
+            client = anthropic.Anthropic(api_key=key)
+
+            response = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            text = response.content[0].text.strip()
+            logger.info(f"Anthropic response length: {len(text)} chars")
+
+            # Handle potential markdown wrappers
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+            data = json.loads(text)
+            data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
+            data["transcript"] = transcript
+
+            if "tasks" not in data:
+                data["tasks"] = []
+            if "highlights" not in data:
+                data["highlights"] = []
+            if "full_summary_sections" not in data:
+                data["full_summary_sections"] = []
+
+            logger.info(f"Anthropic summary generated: {data.get('title', 'No title')}")
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Anthropic JSON parse error: {e}")
+            return self.error_summary(f"Anthropic returned invalid JSON: {str(e)}", transcript)
+        except Exception as e:
+            logger.error(f"Anthropic API error: {e}")
+            return self.error_summary(f"Anthropic error: {str(e)}", transcript)
 
     def save_to_history(self, transcript, summary_data):
         entry = summary_data if isinstance(summary_data, dict) else {"full_summary": str(summary_data)}
