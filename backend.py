@@ -64,6 +64,7 @@ class EnhancedAudioApp:
         self.transcript_callback = transcript_callback
         self.level_callback = level_callback
         self.summary_callback = None  # Set by API server for live summary streaming
+        self._state_lock = threading.Lock()  # Protects live_transcript_text and live_insights
         self.live_transcript_text = ""  # Accumulated transcript for live summary
         self.live_insights = {           # Running insights state
             "meeting_type": None,
@@ -230,8 +231,9 @@ class EnhancedAudioApp:
             return
 
         self.is_recording = True
-        
-        self.live_transcript_text = ""  # Reset live transcript accumulator
+
+        with self._state_lock:
+            self.live_transcript_text = ""  # Reset live transcript accumulator
         
         self.recording_thread = threading.Thread(target=self.record_audio)
         self.recording_thread.start()
@@ -247,8 +249,8 @@ class EnhancedAudioApp:
         logger.info("Recording started.")
 
     def stop_recording(self):
-        # Guard against multiple calls
-        if not self.is_recording and hasattr(self, '_processing_audio') and self._processing_audio:
+        # Guard against multiple calls (e.g. double-click stop button)
+        if self._processing_audio:
             logger.warning("stop_recording() called but already processing - ignoring")
             return
 
@@ -296,7 +298,7 @@ class EnhancedAudioApp:
                     # Normalize: int16 max is 32768
                     norm_level = min(rms / 32768.0, 1.0)
                     self.level_callback(norm_level)
-                except: pass
+                except Exception: pass
 
             q.put(indata.copy())
 
@@ -380,7 +382,7 @@ class EnhancedAudioApp:
                 if file_size < 8000:  # Less than ~0.25 seconds of audio
                     logger.debug(f"Live transcribe: File too small ({file_size} bytes)")
                     continue
-            except:
+            except Exception:
                 continue
 
             # File grows, but header says 0 frames. Whisper needs valid header.
@@ -407,13 +409,14 @@ class EnhancedAudioApp:
 
                 if text and self.transcript_callback:
                     self.transcript_callback(text)
-                    self.live_transcript_text = text  # Update accumulated transcript
+                    with self._state_lock:
+                        self.live_transcript_text = text  # Update accumulated transcript
                 elif not text and self.transcript_callback:
                     self.transcript_callback("(Listening... no speech detected yet)")
 
                 try:
                     os.remove(temp_read_file)
-                except:
+                except Exception:
                     pass
 
             except subprocess.TimeoutExpired:
@@ -433,51 +436,56 @@ class EnhancedAudioApp:
         summary_count = 0
         
         # Reset insights for this recording session
-        self.live_insights = {
-            "meeting_type": None,
-            "confidence": 0,
-            "key_points": [],
-            "action_items": [],
-            "decisions": [],
-            "sentiment": "neutral",
-            "suggested_questions": [],
-            "topic": ""
-        }
+        with self._state_lock:
+            self.live_insights = {
+                "meeting_type": None,
+                "confidence": 0,
+                "key_points": [],
+                "action_items": [],
+                "decisions": [],
+                "sentiment": "neutral",
+                "suggested_questions": [],
+                "topic": ""
+            }
         
         # Don't start until we have a reasonable amount of transcript
         time.sleep(30)
         
         while self.is_recording:
             # Only proceed if we have transcript text
-            if not self.live_transcript_text or len(self.live_transcript_text.strip()) < 50:
+            with self._state_lock:
+                transcript_snapshot = self.live_transcript_text
+            if not transcript_snapshot or len(transcript_snapshot.strip()) < 50:
                 time.sleep(10)
                 continue
-            
+
             # Check for Gemini availability
             if not GOOGLE_GENAI_AVAILABLE:
                 logger.debug("Live insights: Gemini not available")
                 break
-            
+
             raw_key = self.config['API_KEYS'].get('gemini', '')
             key = raw_key.strip().replace('"', '').replace("'", "")
             if not key:
                 logger.debug("Live insights: No Gemini API key")
                 break
-            
+
             try:
                 client = genai.Client(api_key=key)
                 selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
-                
+
                 # Build context from previous insights so Gemini can accumulate
                 prev_context = ""
                 if summary_count > 0:
+                    with self._state_lock:
+                        insights_snapshot = dict(self.live_insights)
                     prev_context = f"""\nPREVIOUS INSIGHTS (build on these, don't repeat):
-- Meeting type: {self.live_insights.get('meeting_type', 'unknown')}
-- Topic: {self.live_insights.get('topic', 'unknown')}
-- Action items so far: {json.dumps(self.live_insights.get('action_items', []))}
-- Decisions so far: {json.dumps(self.live_insights.get('decisions', []))}
+- Meeting type: {insights_snapshot.get('meeting_type', 'unknown')}
+- Topic: {insights_snapshot.get('topic', 'unknown')}
+- Action items so far: {json.dumps(insights_snapshot.get('action_items', []))}
+- Decisions so far: {json.dumps(insights_snapshot.get('decisions', []))}
 """
-                
+
                 prompt = f"""You are a real-time meeting analyst. Analyze this live conversation transcript and return structured insights.
 
 Rules:
@@ -494,7 +502,7 @@ Return ONLY a JSON object with these exact keys. For action_items, each item is 
 Include ALL action items and decisions from previous insights plus any new ones (deduplicated).
 {prev_context}
 TRANSCRIPT (latest):
-{self.live_transcript_text[-3000:]}"""
+{transcript_snapshot[-3000:]}"""
                 
                 response = client.models.generate_content(
                     model=selected_model,
@@ -505,13 +513,18 @@ TRANSCRIPT (latest):
                 text = response.text.strip()
                 if text.startswith("```json"): text = text[7:-3]
                 if text.startswith("```"): text = text[3:-3]
-                
-                data = json.loads(text)
+
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Live insights: Failed to parse Gemini JSON: {e}")
+                    continue
                 summary_count += 1
-                
+
                 # Update running insights state
-                self.live_insights.update(data)
-                
+                with self._state_lock:
+                    self.live_insights.update(data)
+
                 mt = data.get('meeting_type', '?')
                 n_actions = len(data.get('action_items', []))
                 n_decisions = len(data.get('decisions', []))
@@ -520,7 +533,7 @@ TRANSCRIPT (latest):
                     f"actions={n_actions}, decisions={n_decisions}, "
                     f"sentiment={data.get('sentiment', '?')}"
                 )
-                
+
                 if self.summary_callback:
                     self.summary_callback(data)
                     
@@ -534,6 +547,11 @@ TRANSCRIPT (latest):
                 time.sleep(1)
         
         logger.info(f"Live insights loop ended. Total updates: {summary_count}")
+
+    def get_live_insights(self):
+        """Thread-safe read of live_insights."""
+        with self._state_lock:
+            return dict(self.live_insights)
 
     def process_audio(self):
         logger.info("Processing logic started.")
@@ -720,8 +738,12 @@ TRANSCRIPT (latest):
             text = response.text.strip()
             if text.startswith("```json"): text = text[7:-3]
             if text.startswith("```"): text = text[3:-3]
-            
-            data = json.loads(text)
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse Gemini summary JSON: {e}")
+                return self.error_summary(f"Failed to parse AI response", transcript)
             data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
             data["transcript"] = transcript
             
@@ -761,7 +783,7 @@ TRANSCRIPT (latest):
         if os.path.exists(self.history_file):
             try:
                 with open(self.history_file, 'r') as f: self.chat_history = json.load(f)
-            except: self.chat_history = []
+            except Exception: self.chat_history = []
 
     # --- JOURNAL SUPPORT ---
 
@@ -779,7 +801,7 @@ TRANSCRIPT (latest):
             try:
                 with open(self.journal_file, 'r') as f:
                     self.journal_entries = json.load(f)
-            except:
+            except Exception:
                 self.journal_entries = []
 
     def save_journal(self):
@@ -881,7 +903,7 @@ TRANSCRIPT (latest):
             try:
                 with open(self.session_file, 'r') as f:
                     self.session = json.load(f)
-            except:
+            except Exception:
                 self.session = {}
 
     def save_session(self):
