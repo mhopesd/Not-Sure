@@ -33,8 +33,20 @@ function getProjectRoot() {
     if (fs.existsSync(configPath)) {
         return fs.readFileSync(configPath, 'utf-8').trim();
     }
-    // Fallback: hardcoded project path (set at build time)
-    return '/Users/micha/audio-summary-app';
+    // Fallback: resolve from the .app bundle's parent directory
+    // In macOS .app bundles: exe is at NotSure.app/Contents/MacOS/NotSure
+    const appDir = path.join(path.dirname(app.getPath('exe')), '..', '..', '..');
+    const resolved = path.resolve(appDir);
+    if (fs.existsSync(path.join(resolved, 'venv')) || fs.existsSync(path.join(resolved, 'api_server.py'))) {
+        return resolved;
+    }
+    // Last resort: check home directory
+    const homeFallback = path.join(app.getPath('home'), 'Not-Sure');
+    if (fs.existsSync(homeFallback)) {
+        return homeFallback;
+    }
+    console.error('Could not determine project root. Create a .project_root file next to the .app bundle.');
+    return resolved;
 }
 
 /**

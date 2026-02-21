@@ -30,6 +30,28 @@ import whisper
 
 class AudioCaptureError(Exception): pass
 
+# ── Configuration Constants ──────────────────────────────────────
+WHISPER_MODEL_SIZE = "base"
+SAMPLE_RATE = 16000                    # Whisper's preferred sample rate
+AUDIO_CHANNELS = 1                     # Mono recording
+AUDIO_SAMPLE_WIDTH = 2                 # 16-bit = 2 bytes
+
+MODEL_PRELOAD_DELAY = 1.0              # Seconds to wait before preloading Whisper
+THREAD_JOIN_TIMEOUT = 5.0              # Seconds to wait for threads on shutdown
+LIVE_TRANSCRIBE_INTERVAL = 3           # Seconds between live transcription updates
+LIVE_INSIGHTS_INTERVAL = 30            # Seconds between AI insight updates
+LIVE_INSIGHTS_INITIAL_DELAY = 30       # Seconds before first insight analysis
+MIN_TRANSCRIPT_LENGTH = 50             # Minimum chars before starting insights
+
+MIN_AUDIO_FILE_SIZE = 8000             # Bytes: ~0.25s of 16kHz 16-bit mono audio
+MIN_FINAL_AUDIO_SIZE = 4096            # Bytes: minimum valid final audio file
+TRANSCRIPT_SNAPSHOT_LIMIT = 3000       # Chars: max transcript sent to Gemini for insights
+
+FFMPEG_TIMEOUT = 10                    # Seconds: timeout for FFmpeg subprocess
+
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash-exp"
+DEFAULT_OLLAMA_MODEL = "llama3:8b"
+
 # --- Backend Logic (EnhancedAudioApp) ---
 class EnhancedAudioApp:
     def __init__(self, status_callback=None, result_callback=None, transcript_callback=None, level_callback=None):
@@ -80,7 +102,7 @@ class EnhancedAudioApp:
         self.detect_devices()
         
         # Preload model with slight delay to ensure UI loop is ready if it relies on callbacks immediately
-        threading.Timer(1.0, self._preload_model).start()
+        threading.Timer(MODEL_PRELOAD_DELAY, self._preload_model).start()
 
     def set_mode(self, mode_str):
         mode_map = {"Microphone": "microphone", "System Audio": "system", "Hybrid": "hybrid"}
@@ -93,7 +115,7 @@ class EnhancedAudioApp:
             logger.info("Preloading Whisper model...")
             self.update_status("Loading AI Model...")
             try:
-                self.whisper_model = whisper.load_model("base")
+                self.whisper_model = whisper.load_model(WHISPER_MODEL_SIZE)
                 logger.info("Whisper model loaded.")
                 self.update_status("Ready")
             except Exception as e:
@@ -111,7 +133,7 @@ class EnhancedAudioApp:
         self.config['API_KEYS'] = {'openai': '', 'anthropic': '', 'gemini': ''}
         self.config['SETTINGS'] = {
             'history_directory': self.history_directory,
-            'default_llm': 'auto', 'ollama_model': 'llama3:8b'
+            'default_llm': 'auto', 'ollama_model': DEFAULT_OLLAMA_MODEL
         }
         try:
             if os.path.exists(self.config_file):
@@ -264,17 +286,16 @@ class EnhancedAudioApp:
         try:
             logger.info("Waiting for threads to finish...")
             if self.recording_thread:
-                self.recording_thread.join(timeout=3.0)
+                self.recording_thread.join(timeout=THREAD_JOIN_TIMEOUT)
             if self.transcription_thread:
-                self.transcription_thread.join(timeout=3.0)
+                self.transcription_thread.join(timeout=THREAD_JOIN_TIMEOUT)
             if hasattr(self, 'summary_thread') and self.summary_thread:
-                self.summary_thread.join(timeout=3.0)
+                self.summary_thread.join(timeout=THREAD_JOIN_TIMEOUT)
             self.process_audio()
         finally:
             self._processing_audio = False
 
     def record_audio(self):
-        SAMPLE_RATE = 16000 # Whisper prefers 16k
         
         temp_dir = tempfile.gettempdir()
         # Atomic Write Strategy: Write to .part file
@@ -311,13 +332,13 @@ class EnhancedAudioApp:
             device_index = device['index'] if device else None
             
             with sd.InputStream(samplerate=SAMPLE_RATE, device=device_index,
-                                channels=1, callback=audio_callback, dtype='int16'):
+                                channels=AUDIO_CHANNELS, callback=audio_callback, dtype='int16'):
                 
                 self.update_status("● Recording...")
                 success = False
                 with wave.open(self.part_file, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2) # 16-bit
+                    wf.setnchannels(AUDIO_CHANNELS)
+                    wf.setsampwidth(AUDIO_SAMPLE_WIDTH)
                     wf.setframerate(SAMPLE_RATE)
                     
                     while self.is_recording:
@@ -363,7 +384,7 @@ class EnhancedAudioApp:
         transcribe_count = 0
 
         while self.is_recording:
-            time.sleep(3)  # Update every 3 seconds
+            time.sleep(LIVE_TRANSCRIBE_INTERVAL)
 
             # Check prerequisites
             if not self.whisper_model:
@@ -379,7 +400,7 @@ class EnhancedAudioApp:
             # Check file size - need enough audio data
             try:
                 file_size = os.path.getsize(self.part_file)
-                if file_size < 8000:  # Less than ~0.25 seconds of audio
+                if file_size < MIN_AUDIO_FILE_SIZE:
                     logger.debug(f"Live transcribe: File too small ({file_size} bytes)")
                     continue
             except Exception:
@@ -394,7 +415,7 @@ class EnhancedAudioApp:
                 result = subprocess.run(
                     ['ffmpeg', '-y', '-i', self.part_file, '-c', 'copy', temp_read_file],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=10
+                    timeout=FFMPEG_TIMEOUT
                 )
 
                 if result.returncode != 0 or not os.path.exists(temp_read_file):
@@ -449,13 +470,13 @@ class EnhancedAudioApp:
             }
         
         # Don't start until we have a reasonable amount of transcript
-        time.sleep(30)
+        time.sleep(LIVE_INSIGHTS_INITIAL_DELAY)
         
         while self.is_recording:
             # Only proceed if we have transcript text
             with self._state_lock:
                 transcript_snapshot = self.live_transcript_text
-            if not transcript_snapshot or len(transcript_snapshot.strip()) < 50:
+            if not transcript_snapshot or len(transcript_snapshot.strip()) < MIN_TRANSCRIPT_LENGTH:
                 time.sleep(10)
                 continue
 
@@ -472,7 +493,7 @@ class EnhancedAudioApp:
 
             try:
                 client = genai.Client(api_key=key)
-                selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
+                selected_model = self.config['SETTINGS'].get('gemini_model', DEFAULT_GEMINI_MODEL)
 
                 # Build context from previous insights so Gemini can accumulate
                 prev_context = ""
@@ -502,7 +523,7 @@ Return ONLY a JSON object with these exact keys. For action_items, each item is 
 Include ALL action items and decisions from previous insights plus any new ones (deduplicated).
 {prev_context}
 TRANSCRIPT (latest):
-{transcript_snapshot[-3000:]}"""
+{transcript_snapshot[-TRANSCRIPT_SNAPSHOT_LIMIT:]}"""
                 
                 response = client.models.generate_content(
                     model=selected_model,
@@ -540,8 +561,8 @@ TRANSCRIPT (latest):
             except Exception as e:
                 logger.debug(f"Live insights error (will retry): {e}")
             
-            # Wait 30 seconds between insight updates
-            for _ in range(30):
+            # Wait between insight updates
+            for _ in range(LIVE_INSIGHTS_INTERVAL):
                 if not self.is_recording:
                     break
                 time.sleep(1)
@@ -590,9 +611,9 @@ TRANSCRIPT (latest):
 
         self.update_status("Finalizing Transcript...")
         try:
-            if not self.whisper_model: self.whisper_model = whisper.load_model("base")
-        
-            if os.path.getsize(self.temp_audio_file) < 4096:
+            if not self.whisper_model: self.whisper_model = whisper.load_model(WHISPER_MODEL_SIZE)
+
+            if os.path.getsize(self.temp_audio_file) < MIN_FINAL_AUDIO_SIZE:
                 raise AudioCaptureError("File too small - Audio subsystem failure detected")
 
             result = self.whisper_model.transcribe(self.temp_audio_file, fp16=False)
@@ -656,7 +677,7 @@ TRANSCRIPT (latest):
             client = genai.Client(api_key=key)
             
             # Use selected model or fallback
-            selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
+            selected_model = self.config['SETTINGS'].get('gemini_model', DEFAULT_GEMINI_MODEL)
             reasoning_level = self.config['SETTINGS'].get('reasoning_level', 'Standard')
             
             logger.info(f"Generating content with model: {selected_model}, Reasoning: {reasoning_level}")
@@ -861,7 +882,7 @@ TRANSCRIPT (latest):
 
         try:
             client = genai.Client(api_key=key)
-            selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
+            selected_model = self.config['SETTINGS'].get('gemini_model', DEFAULT_GEMINI_MODEL)
 
             prompt = f"""You are a thoughtful life coach and productivity assistant.
             Based on this journal entry, provide helpful suggestions, insights, or action items.
