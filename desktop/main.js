@@ -177,8 +177,8 @@ function createWindow() {
         mainWindow.loadURL('http://localhost:5173');
         mainWindow.webContents.openDevTools({ mode: 'detach' });
     } else {
-        // Production: load the built frontend
-        const frontendPath = path.join(__dirname, 'frontend', 'index.html');
+        // Production: load the built frontend from figma-ui
+        const frontendPath = path.join(__dirname, '..', 'figma-ui', 'dist', 'index.html');
         mainWindow.loadFile(frontendPath);
     }
 
@@ -657,7 +657,7 @@ app.whenReady().then(async () => {
             if (IS_DEV) {
                 mainWindow.loadURL('http://localhost:5173');
             } else {
-                const frontendPath = path.join(__dirname, 'frontend', 'index.html');
+                const frontendPath = path.join(__dirname, '..', 'figma-ui', 'dist', 'index.html');
                 mainWindow.loadFile(frontendPath);
             }
         }
