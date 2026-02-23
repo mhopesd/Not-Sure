@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Settings,
   Shield,
@@ -24,8 +24,12 @@ import {
   RotateCcw,
   Trash2,
   Loader2,
+  Server,
+  ChevronDown,
+  RefreshCw,
 } from "lucide-react";
 import { getApiUrl, getApiHeaders } from "../config/api";
+import { useIntegrations } from "../hooks/useIntegrations";
 
 const ICON_COL = "w-8 h-8 shrink-0 rounded-lg flex items-center justify-center";
 
@@ -119,13 +123,10 @@ export function SettingsView() {
   const [isConfigured, setIsConfigured] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
+  const [ollamaModel, setOllamaModel] = useState("llama3:8b");
 
-  // Integrations
-  const [gcalConnected, setGcalConnected] = useState(false);
-  const [outlookConnected, setOutlookConnected] = useState(false);
-  const [notionConnected, setNotionConnected] = useState(false);
-  const [slackConnected, setSlackConnected] = useState(false);
-  const [linearConnected, setLinearConnected] = useState(false);
+  // Integrations (wired to backend OAuth)
+  const integrations = useIntegrations();
 
   // Notifications
   const [meetingReminders, setMeetingReminders] = useState(true);
@@ -142,7 +143,11 @@ export function SettingsView() {
           const data = await response.json();
           setIsConfigured(data.has_gemini_key || false);
           if (data.llm_provider) {
-            setAiProvider(data.llm_provider === "gemini" ? "google" : data.llm_provider);
+            const p = data.llm_provider;
+            setAiProvider(p === "gemini" ? "google" : p === "ollama" ? "local" : p);
+          }
+          if (data.ollama_model) {
+            setOllamaModel(data.ollama_model);
           }
         }
       } catch (err) {
@@ -151,6 +156,10 @@ export function SettingsView() {
     }
     loadSettings();
   }, []);
+
+  // Map frontend provider id → backend llm name
+  const toBackendProvider = (p: string) =>
+    p === "google" ? "gemini" : p === "local" ? "ollama" : p;
 
   const handleSaveApiKey = async () => {
     if (!apiKey.trim()) {
@@ -166,7 +175,7 @@ export function SettingsView() {
         headers: getApiHeaders(),
         body: JSON.stringify({
           gemini_api_key: aiProvider === "google" ? apiKey : undefined,
-          llm_provider: aiProvider === "google" ? "gemini" : aiProvider,
+          llm_provider: toBackendProvider(aiProvider),
         }),
       });
 
@@ -180,6 +189,32 @@ export function SettingsView() {
         setSaveMessage(`Error: ${error.detail || "Failed to save API key"}`);
       }
     } catch (err) {
+      setSaveMessage("Network error: Is the API server running?");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveOllama = async () => {
+    setIsSaving(true);
+    setSaveMessage("");
+    try {
+      const response = await fetch(getApiUrl("/api/settings"), {
+        method: "PUT",
+        headers: getApiHeaders(),
+        body: JSON.stringify({
+          llm_provider: "ollama",
+          ollama_model: ollamaModel,
+        }),
+      });
+      if (response.ok) {
+        setSaveMessage("Ollama settings saved!");
+        setTimeout(() => setSaveMessage(""), 3000);
+      } else {
+        const error = await response.json();
+        setSaveMessage(`Error: ${error.detail || "Failed to save"}`);
+      }
+    } catch {
       setSaveMessage("Network error: Is the API server running?");
     } finally {
       setIsSaving(false);
@@ -247,16 +282,13 @@ export function SettingsView() {
               isSaving={isSaving}
               saveMessage={saveMessage}
               onSave={handleSaveApiKey}
+              ollamaModel={ollamaModel}
+              setOllamaModel={setOllamaModel}
+              onSaveOllama={handleSaveOllama}
             />
           )}
           {activeSection === "integrations" && (
-            <IntegrationsSection
-              gcal={gcalConnected} setGcal={setGcalConnected}
-              outlook={outlookConnected} setOutlook={setOutlookConnected}
-              notion={notionConnected} setNotion={setNotionConnected}
-              slack={slackConnected} setSlack={setSlackConnected}
-              linear={linearConnected} setLinear={setLinearConnected}
-            />
+            <IntegrationsSection integrations={integrations} />
           )}
           {activeSection === "notifications" && (
             <NotificationsSection
@@ -312,14 +344,113 @@ function PermissionsSection({ mic, setMic, sysAudio, setSysAudio, screen, setScr
   );
 }
 
+/* ═══ Ollama Status Sub-component ═══ */
+function OllamaConfig({ model, setModel, isSaving, saveMessage, onSave }: {
+  model: string;
+  setModel: (m: string) => void;
+  isSaving: boolean;
+  saveMessage: string;
+  onSave: () => void;
+}) {
+  const [health, setHealth] = useState<{ running: boolean; models: string[] } | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  const checkHealth = useCallback(async () => {
+    setChecking(true);
+    try {
+      const res = await fetch(getApiUrl("/api/ollama/health"), { headers: getApiHeaders() });
+      if (res.ok) {
+        setHealth(await res.json());
+      } else {
+        setHealth({ running: false, models: [] });
+      }
+    } catch {
+      setHealth({ running: false, models: [] });
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => { checkHealth(); }, [checkHealth]);
+
+  const running = health?.running ?? false;
+  const models = health?.models ?? [];
+
+  return (
+    <div className="space-y-3">
+      {/* Status */}
+      <div className="flex items-center gap-2 p-2 rounded-lg" style={{ background: running ? "rgba(109,213,140,0.06)" : "rgba(255,100,100,0.06)", border: `1px solid ${running ? "rgba(109,213,140,0.1)" : "rgba(255,100,100,0.1)"}` }}>
+        <div className={`w-2 h-2 rounded-full ${running ? "bg-[#6dd58c]" : "bg-red-400"}`} />
+        <span className={`text-[10px] flex-1 ${running ? "text-[#6dd58c]" : "text-red-400"}`}>
+          {checking ? "Checking..." : running ? `Ollama running — ${models.length} model${models.length !== 1 ? "s" : ""} available` : "Ollama not detected"}
+        </span>
+        <button onClick={checkHealth} disabled={checking} className="text-white/20 hover:text-white/40 transition-colors">
+          <RefreshCw size={10} className={checking ? "animate-spin" : ""} />
+        </button>
+      </div>
+
+      {!running && !checking && (
+        <div className="p-2 rounded-lg text-[10px] text-white/30" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)" }}>
+          Start Ollama with: <code className="text-[#8b5cf6] font-mono">ollama serve</code>
+        </div>
+      )}
+
+      {/* Model selector */}
+      <div>
+        <label className="text-[10px] text-white/25 flex items-center gap-1 mb-1.5"><Server size={9} /> Model</label>
+        {models.length > 0 ? (
+          <div className="relative">
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="w-full appearance-none px-3 py-2 rounded-lg text-[11px] text-white/60 outline-none font-mono pr-8"
+              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+            >
+              {models.map((m) => (
+                <option key={m} value={m} className="bg-[#1a1a2e] text-white/60">{m}</option>
+              ))}
+            </select>
+            <ChevronDown size={10} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/20 pointer-events-none" />
+          </div>
+        ) : (
+          <input
+            type="text"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            className="w-full px-3 py-2 rounded-lg text-[11px] text-white/60 placeholder:text-white/15 outline-none font-mono"
+            style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+            placeholder="llama3:8b"
+          />
+        )}
+      </div>
+
+      {/* Save */}
+      <button
+        onClick={onSave}
+        disabled={isSaving || !model.trim()}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] transition-all disabled:opacity-40"
+        style={{ background: "rgba(139,92,246,0.15)", border: "1px solid rgba(139,92,246,0.2)", color: "#8b5cf6" }}
+      >
+        {isSaving && <Loader2 size={10} className="animate-spin" />}
+        Save Ollama Settings
+      </button>
+      {saveMessage && (
+        <p className={`text-[10px] mt-1.5 ${saveMessage.includes("Error") || saveMessage.includes("Network") ? "text-red-400" : "text-[#6dd58c]"}`}>
+          {saveMessage}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /* ═══ AI Config ═══ */
-function AISection({ provider, setProvider, apiKey, setApiKey, showKey, setShowKey, autoTranscribe, setAutoTranscribe, autoSummarize, setAutoSummarize, isConfigured, isSaving, saveMessage, onSave }: any) {
+function AISection({ provider, setProvider, apiKey, setApiKey, showKey, setShowKey, autoTranscribe, setAutoTranscribe, autoSummarize, setAutoSummarize, isConfigured, isSaving, saveMessage, onSave, ollamaModel, setOllamaModel, onSaveOllama }: any) {
   return (
     <div className="space-y-4">
       <SectionHeader icon={<Sparkles size={14} />} title="AI Configuration" desc="Transcription and summarization settings" color="rgba(255,209,0,0.12)" />
 
       {/* Status indicator */}
-      {isConfigured && (
+      {isConfigured && provider !== "local" && (
         <div className="flex items-center gap-1.5 p-2 rounded-lg" style={{ background: "rgba(109,213,140,0.06)", border: "1px solid rgba(109,213,140,0.1)" }}>
           <Check size={10} className="text-[#6dd58c]" />
           <span className="text-[10px] text-[#6dd58c]">API key configured</span>
@@ -353,7 +484,7 @@ function AISection({ provider, setProvider, apiKey, setApiKey, showKey, setShowK
         </div>
       </div>
 
-      {/* API Key */}
+      {/* API Key — for cloud providers */}
       {provider !== "local" && (
         <div>
           <label className="text-[10px] text-white/25 flex items-center gap-1 mb-1.5"><KeyRound size={9} /> API Key</label>
@@ -375,6 +506,17 @@ function AISection({ provider, setProvider, apiKey, setApiKey, showKey, setShowK
         </div>
       )}
 
+      {/* Ollama Config — for local provider */}
+      {provider === "local" && (
+        <OllamaConfig
+          model={ollamaModel}
+          setModel={setOllamaModel}
+          isSaving={isSaving}
+          saveMessage={saveMessage}
+          onSave={onSaveOllama}
+        />
+      )}
+
       {/* Auto features */}
       <div>
         <span className="text-[10px] text-white/25 uppercase tracking-wider mb-1.5 block">Automation</span>
@@ -388,28 +530,113 @@ function AISection({ provider, setProvider, apiKey, setApiKey, showKey, setShowK
 }
 
 /* ═══ Integrations ═══ */
-function IntegrationsSection({ gcal, setGcal, outlook, setOutlook, notion, setNotion, slack, setSlack, linear, setLinear }: any) {
-  const items = [
-    { label: "Google Calendar", desc: "Auto-detect meetings", icon: <Calendar size={13} />, color: "#3b82f6", connected: gcal, toggle: () => setGcal(!gcal) },
-    { label: "Outlook Calendar", desc: "Sync from Microsoft 365", icon: <CalendarDays size={13} />, color: "#0078d4", connected: outlook, toggle: () => setOutlook(!outlook) },
-    { label: "Notion", desc: "Export summaries as pages", icon: <FileText size={13} />, color: "#ffffff", connected: notion, toggle: () => setNotion(!notion) },
-    { label: "Slack", desc: "Post to channels", icon: <MessageSquare size={13} />, color: "#e01e5a", connected: slack, toggle: () => setSlack(!slack) },
-    { label: "Linear", desc: "Create issues from actions", icon: <Zap size={13} />, color: "#5e6ad2", connected: linear, toggle: () => setLinear(!linear) },
+function IntegrationsSection({ integrations }: { integrations: ReturnType<typeof useIntegrations> }) {
+  const { status, loading, connecting, error } = integrations;
+
+  const googleConnected = status?.google?.connected ?? false;
+  const microsoftConnected = status?.microsoft?.connected ?? false;
+  const connectedCount = [googleConnected, microsoftConnected].filter(Boolean).length;
+
+  const wiredItems = [
+    {
+      label: "Google Calendar",
+      desc: googleConnected ? `Connected as ${status?.google?.email || "Google Account"}` : "Auto-detect meetings",
+      icon: <Calendar size={13} />,
+      color: "#3b82f6",
+      connected: googleConnected,
+      onConnect: integrations.connectGoogle,
+      onDisconnect: integrations.disconnectGoogle,
+      isConnecting: connecting === "google",
+    },
+    {
+      label: "Outlook Calendar",
+      desc: microsoftConnected ? `Connected as ${status?.microsoft?.email || "Microsoft Account"}` : "Sync from Microsoft 365",
+      icon: <CalendarDays size={13} />,
+      color: "#0078d4",
+      connected: microsoftConnected,
+      onConnect: integrations.connectMicrosoft,
+      onDisconnect: integrations.disconnectMicrosoft,
+      isConnecting: connecting === "microsoft",
+    },
   ];
-  const connectedCount = items.filter((i) => i.connected).length;
+
+  const comingSoonItems = [
+    { label: "Notion", desc: "Export summaries as pages", icon: <FileText size={13} />, color: "#ffffff" },
+    { label: "Slack", desc: "Post to channels", icon: <MessageSquare size={13} />, color: "#e01e5a" },
+    { label: "Linear", desc: "Create issues from actions", icon: <Zap size={13} />, color: "#5e6ad2" },
+  ];
 
   return (
     <div className="space-y-4">
-      <SectionHeader icon={<Plug size={14} />} title="Integrations" desc={`${connectedCount} connected`} color="rgba(109,213,140,0.12)" />
-      <div className="space-y-1.5">
-        {items.map((item) => (
-          <SettingRow key={item.label} icon={<span style={{ color: item.color }}>{item.icon}</span>} iconBg={`${item.color}12`} title={item.label} desc={item.desc} right={
-            <button onClick={item.toggle} className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] transition-all" style={{ background: item.connected ? `${item.color}15` : "rgba(255,255,255,0.03)", color: item.connected ? item.color : "rgba(255,255,255,0.3)", border: `1px solid ${item.connected ? `${item.color}25` : "rgba(255,255,255,0.05)"}` }}>
-              {item.connected ? <><Check size={9} /> Connected</> : <><Plug size={9} /> Connect</>}
-            </button>
-          } />
-        ))}
-      </div>
+      <SectionHeader icon={<Plug size={14} />} title="Integrations" desc={loading ? "Loading..." : `${connectedCount} connected`} color="rgba(109,213,140,0.12)" />
+
+      {error && (
+        <div className="flex items-center gap-1.5 p-2 rounded-lg" style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.12)" }}>
+          <span className="text-[10px] text-red-400">{error}</span>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-6">
+          <Loader2 size={16} className="animate-spin text-white/20" />
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {/* Wired: Google & Microsoft */}
+          {wiredItems.map((item) => (
+            <SettingRow
+              key={item.label}
+              icon={<span style={{ color: item.color }}>{item.icon}</span>}
+              iconBg={`${item.color}12`}
+              title={item.label}
+              desc={item.desc}
+              right={
+                item.connected ? (
+                  <button
+                    onClick={item.onDisconnect}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] transition-all hover:opacity-80"
+                    style={{ background: `${item.color}15`, color: item.color, border: `1px solid ${item.color}25` }}
+                  >
+                    <Check size={9} /> Connected
+                  </button>
+                ) : (
+                  <button
+                    onClick={item.onConnect}
+                    disabled={item.isConnecting}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] transition-all disabled:opacity-40"
+                    style={{ background: "rgba(255,255,255,0.03)", color: "rgba(255,255,255,0.3)", border: "1px solid rgba(255,255,255,0.05)" }}
+                  >
+                    {item.isConnecting ? (
+                      <><Loader2 size={9} className="animate-spin" /> Connecting...</>
+                    ) : (
+                      <><Plug size={9} /> Connect</>
+                    )}
+                  </button>
+                )
+              }
+            />
+          ))}
+
+          {/* Coming Soon: Notion, Slack, Linear */}
+          {comingSoonItems.map((item) => (
+            <SettingRow
+              key={item.label}
+              icon={<span style={{ color: item.color, opacity: 0.35 }}>{item.icon}</span>}
+              iconBg="rgba(255,255,255,0.02)"
+              title={item.label}
+              desc={item.desc}
+              right={
+                <span
+                  className="text-[9px] text-white/20 px-2 py-1 rounded-md"
+                  style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)" }}
+                >
+                  Coming Soon
+                </span>
+              }
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

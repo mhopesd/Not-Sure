@@ -13,6 +13,7 @@ import time
 import shutil
 import subprocess
 import traceback
+import requests
 
 # Use centralized logging
 from app_logging import logger
@@ -424,14 +425,16 @@ class EnhancedAudioApp:
         logger.info(f"Live transcription loop ended. Total transcriptions: {transcribe_count}")
 
     def live_summary_loop(self):
-        """Real-time conversation intelligence via Gemini.
-        
+        """Real-time conversation intelligence via Gemini or Ollama.
+
         Detects meeting type, extracts action items, decisions, sentiment,
-        and suggests contextual follow-up questions every 30 seconds.
+        and suggests contextual follow-up questions periodically.
         """
-        logger.info("Live insights loop started.")
+        llm = self.config['SETTINGS'].get('default_llm', 'ollama')
+        logger.info(f"Live insights loop started (provider: {llm}).")
         summary_count = 0
-        
+        ollama_disabled = False  # auto-disable if Ollama is too slow
+
         # Reset insights for this recording session
         self.live_insights = {
             "meeting_type": None,
@@ -443,42 +446,30 @@ class EnhancedAudioApp:
             "suggested_questions": [],
             "topic": ""
         }
-        
+
+        # Determine interval: Ollama is slower, give it more time
+        interval = 60 if llm == 'ollama' else 30
+
         # Don't start until we have a reasonable amount of transcript
-        time.sleep(30)
-        
+        time.sleep(interval)
+
         while self.is_recording:
             # Only proceed if we have transcript text
             if not self.live_transcript_text or len(self.live_transcript_text.strip()) < 50:
                 time.sleep(10)
                 continue
-            
-            # Check for Gemini availability
-            if not GOOGLE_GENAI_AVAILABLE:
-                logger.debug("Live insights: Gemini not available")
-                break
-            
-            raw_key = self.config['API_KEYS'].get('gemini', '')
-            key = raw_key.strip().replace('"', '').replace("'", "")
-            if not key:
-                logger.debug("Live insights: No Gemini API key")
-                break
-            
-            try:
-                client = genai.Client(api_key=key)
-                selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
-                
-                # Build context from previous insights so Gemini can accumulate
-                prev_context = ""
-                if summary_count > 0:
-                    prev_context = f"""\nPREVIOUS INSIGHTS (build on these, don't repeat):
+
+            # Build the shared prompt (same for both providers)
+            prev_context = ""
+            if summary_count > 0:
+                prev_context = f"""\nPREVIOUS INSIGHTS (build on these, don't repeat):
 - Meeting type: {self.live_insights.get('meeting_type', 'unknown')}
 - Topic: {self.live_insights.get('topic', 'unknown')}
 - Action items so far: {json.dumps(self.live_insights.get('action_items', []))}
 - Decisions so far: {json.dumps(self.live_insights.get('decisions', []))}
 """
-                
-                prompt = f"""You are a real-time meeting analyst. Analyze this live conversation transcript and return structured insights.
+
+            prompt = f"""You are a real-time meeting analyst. Analyze this live conversation transcript and return structured insights.
 
 Rules:
 - meeting_type: classify as one of: standup, one_on_one, brainstorm, interview, all_hands, presentation, planning, retrospective, client_call, casual, other
@@ -495,23 +486,68 @@ Include ALL action items and decisions from previous insights plus any new ones 
 {prev_context}
 TRANSCRIPT (latest):
 {self.live_transcript_text[-3000:]}"""
-                
-                response = client.models.generate_content(
-                    model=selected_model,
-                    contents=[prompt],
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
-                )
-                
-                text = response.text.strip()
-                if text.startswith("```json"): text = text[7:-3]
-                if text.startswith("```"): text = text[3:-3]
-                
-                data = json.loads(text)
+
+            data = None
+
+            if llm == 'gemini':
+                # ── Gemini path ──
+                if not GOOGLE_GENAI_AVAILABLE:
+                    logger.debug("Live insights: Gemini not available")
+                    break
+                raw_key = self.config['API_KEYS'].get('gemini', '')
+                key = raw_key.strip().replace('"', '').replace("'", "")
+                if not key:
+                    logger.debug("Live insights: No Gemini API key")
+                    break
+                try:
+                    client = genai.Client(api_key=key)
+                    selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
+                    response = client.models.generate_content(
+                        model=selected_model,
+                        contents=[prompt],
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
+                    text = response.text.strip()
+                    if text.startswith("```json"): text = text[7:-3]
+                    if text.startswith("```"): text = text[3:-3]
+                    data = json.loads(text)
+                except Exception as e:
+                    logger.debug(f"Live insights (Gemini) error (will retry): {e}")
+
+            elif llm == 'ollama' and not ollama_disabled:
+                # ── Ollama path ──
+                model = self.config['SETTINGS'].get('ollama_model', 'llama3:8b')
+                try:
+                    start_t = time.time()
+                    resp = requests.post(
+                        "http://localhost:11434/api/generate",
+                        json={"model": model, "stream": False, "prompt": prompt, "format": "json"},
+                        timeout=90,
+                    )
+                    elapsed_t = time.time() - start_t
+                    resp.raise_for_status()
+                    text = resp.json().get("response", "").strip()
+                    if text.startswith("```json"): text = text[7:-3]
+                    if text.startswith("```"): text = text[3:-3]
+                    data = json.loads(text)
+
+                    # Auto-disable if Ollama is too slow for live use
+                    if elapsed_t > 45:
+                        logger.warning(f"Live insights: Ollama took {elapsed_t:.0f}s — disabling live insights to avoid lag.")
+                        ollama_disabled = True
+                except requests.exceptions.ConnectionError:
+                    logger.debug("Live insights: Ollama not running, disabling live insights.")
+                    break
+                except Exception as e:
+                    logger.debug(f"Live insights (Ollama) error (will retry): {e}")
+            else:
+                # Unsupported provider for live insights
+                logger.info(f"Live insights: provider '{llm}' not supported for live insights.")
+                break
+
+            if data:
                 summary_count += 1
-                
-                # Update running insights state
                 self.live_insights.update(data)
-                
                 mt = data.get('meeting_type', '?')
                 n_actions = len(data.get('action_items', []))
                 n_decisions = len(data.get('decisions', []))
@@ -520,19 +556,15 @@ TRANSCRIPT (latest):
                     f"actions={n_actions}, decisions={n_decisions}, "
                     f"sentiment={data.get('sentiment', '?')}"
                 )
-                
                 if self.summary_callback:
                     self.summary_callback(data)
-                    
-            except Exception as e:
-                logger.debug(f"Live insights error (will retry): {e}")
-            
-            # Wait 30 seconds between insight updates
-            for _ in range(30):
+
+            # Wait between insight updates
+            for _ in range(interval):
                 if not self.is_recording:
                     break
                 time.sleep(1)
-        
+
         logger.info(f"Live insights loop ended. Total updates: {summary_count}")
 
     def process_audio(self):
@@ -615,11 +647,12 @@ TRANSCRIPT (latest):
         llm = self.config['SETTINGS'].get('default_llm', 'ollama')
         logger.info(f"Summarizing with {llm}")
         if llm == 'gemini': return self._summarize_with_gemini(transcript, audio_path)
+        if llm == 'ollama': return self._summarize_with_ollama(transcript)
         return {
             "title": f"Meeting {datetime.now().strftime('%b %d')}",
             "date": datetime.now().strftime("%b %d at %I:%M %p"),
-            "executive_summary": "Summary requires Gemini API Key configuration.",
-            "full_summary": "Please configure audio_config.ini",
+            "executive_summary": f"Summarization with '{llm}' is not yet supported. Please select Gemini or Ollama in Settings.",
+            "full_summary": "Configure your LLM provider in Settings → AI Configuration.",
             "tasks": [],
             "transcript": transcript
         }
@@ -743,6 +776,110 @@ TRANSCRIPT (latest):
         except Exception as e:
             logger.error(f"Gemini API Error: {e}")
             return self.error_summary(f"Gemini Error: {str(e)}", transcript)
+
+    def _summarize_with_ollama(self, transcript):
+        """Summarize using a local Ollama model. Mirrors Gemini's structured JSON output."""
+        model = self.config['SETTINGS'].get('ollama_model', 'llama3:8b')
+        logger.info(f"Sending request to Ollama (model: {model})...")
+        self.update_status("AI Summarizing (Local)...")
+
+        prompt = f"""You are an expert executive assistant. Analyze the following meeting transcript.
+
+TRANSCRIPT:
+{transcript}
+
+Output a JSON object with this EXACT structure (no markdown, no explanation, ONLY the JSON object):
+{{
+    "title": "Short descriptive title for this meeting",
+    "executive_summary": "2-3 sentence high-level summary of the meeting.",
+    "speaker_info": {{
+        "count": 2,
+        "list": ["Speaker 1", "Speaker 2"]
+    }},
+    "diarized_transcript": [
+        {{"speaker": "Speaker 1", "timestamp": "00:00-00:15", "text": "What they said"}},
+        {{"speaker": "Speaker 2", "timestamp": "00:15-00:30", "text": "Their response"}}
+    ],
+    "highlights": ["Key point 1", "Key point 2", "Key point 3"],
+    "full_summary_sections": [
+        {{"header": "Topic", "content": "Details about this topic", "quote": "Relevant quote", "attribution": "Speaker 1"}}
+    ],
+    "tasks": [
+        {{"description": "Action item description", "assignee": "Person name or null", "due_date": "Date or null"}}
+    ]
+}}
+
+Rules:
+- Identify distinct speakers from text patterns and label them.
+- Extract ALL action items mentioned.
+- Provide at least 3 highlights.
+- If you cannot identify speakers, use "Speaker 1", "Speaker 2", etc.
+- Return ONLY valid JSON. No markdown fences, no extra text."""
+
+        try:
+            response = requests.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": model,
+                    "stream": False,
+                    "prompt": prompt,
+                    "format": "json",
+                },
+                timeout=180,
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            text = result.get("response", "").strip()
+
+            # Strip markdown fences if present
+            if text.startswith("```json"): text = text[7:-3]
+            if text.startswith("```"): text = text[3:-3]
+            text = text.strip()
+
+            data = json.loads(text)
+            data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
+            data["transcript"] = transcript
+
+            # Build enhanced transcript from diarized data if available
+            if "diarized_transcript" in data and isinstance(data["diarized_transcript"], list) and len(data["diarized_transcript"]) > 0:
+                diarized_lines = []
+                for seg in data["diarized_transcript"]:
+                    speaker = seg.get("speaker", "Speaker")
+                    ts = seg.get("timestamp", "")
+                    txt = seg.get("text", "").strip()
+                    if ts:
+                        diarized_lines.append(f"[{ts}] {speaker}: {txt}")
+                    else:
+                        diarized_lines.append(f"{speaker}: {txt}")
+                data["diarized_transcript_text"] = "\n".join(diarized_lines)
+                logger.info(f"Ollama diarized transcript: {len(data['diarized_transcript'])} segments")
+
+            logger.info(f"Ollama summarization complete: {data.get('title', '?')}")
+            return data
+
+        except requests.exceptions.ConnectionError:
+            msg = "Ollama not running. Start it with: ollama serve"
+            logger.error(msg)
+            return self.error_summary(msg, transcript)
+        except requests.exceptions.Timeout:
+            msg = f"Ollama timed out after 180s (model: {model}). Try a smaller model."
+            logger.error(msg)
+            return self.error_summary(msg, transcript)
+        except json.JSONDecodeError as e:
+            logger.error(f"Ollama returned invalid JSON: {e}\nRaw: {text[:500]}")
+            # Try to salvage a basic summary from the raw text
+            return {
+                "title": f"Meeting {datetime.now().strftime('%b %d')}",
+                "date": datetime.now().strftime("%b %d at %I:%M %p"),
+                "executive_summary": text[:500] if text else "Ollama returned unparseable output.",
+                "full_summary": text or "",
+                "tasks": [],
+                "transcript": transcript,
+            }
+        except Exception as e:
+            logger.error(f"Ollama error: {e}\n{traceback.format_exc()}")
+            return self.error_summary(f"Ollama Error: {str(e)}", transcript)
 
     def error_summary(self, error_msg, transcript):
         return {"title": "Error Processing", "executive_summary": error_msg, "full_summary": "", "tasks": [], "transcript": transcript}
