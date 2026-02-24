@@ -4,6 +4,7 @@ from ui.styles import ThemeManager, FONTS, RADIUS, SPACING
 from ui.components.buttons import PrimaryButton, OutlineButton, DestructiveButton
 from ui.components.inputs import StyledEntry, StyledLabel, PasswordEntry, FormField
 from ui.components.badges import Badge
+from secure_store import secure_store
 
 
 class SettingsView(ctk.CTkFrame):
@@ -220,13 +221,17 @@ class SettingsView(ctk.CTkFrame):
         )
         self.api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, SPACING["sm"]))
 
-        # Load existing key (masked)
-        if self.backend:
+        # Load existing key (masked) — check keychain first, then config
+        has_key = False
+        if secure_store.is_available and secure_store.get_api_key('gemini'):
+            has_key = True
+        elif self.backend:
             config = getattr(self.backend, 'config', None)
             if config:
                 key = config.get('API', 'gemini_api_key', fallback='')
-                if key:
-                    self.api_key_entry.input.insert(0, "••••••••••••••••")
+                has_key = bool(key)
+        if has_key:
+            self.api_key_entry.input.insert(0, "••••••••••••••••")
 
         save_key_btn = PrimaryButton(
             key_input_row,
@@ -419,7 +424,7 @@ class SettingsView(ctk.CTkFrame):
         self._update_api_status()
 
     def _save_api_key(self):
-        """Save the API key to configuration"""
+        """Save the API key to the OS keychain (or config file as fallback)"""
         key = self.api_key_entry.input.get().strip()
 
         if not key or key == "••••••••••••••••":
@@ -437,29 +442,36 @@ class SettingsView(ctk.CTkFrame):
         provider_key = provider_map.get(provider, "gemini")
 
         if self.backend:
-            # Save to config
-            if not self.backend.config.has_section('API'):
-                self.backend.config.add_section('API')
+            # Save API key to keychain (secure) — falls back to config if unavailable
+            stored_securely = secure_store.set_api_key(provider_key, key)
+
+            # Save non-secret settings to config file
             if not self.backend.config.has_section('Settings'):
                 self.backend.config.add_section('Settings')
-
-            # Set the appropriate API key
-            key_names = {
-                "gemini": "gemini_api_key",
-                "openai": "openai_api_key",
-                "anthropic": "anthropic_api_key"
-            }
-            key_name = key_names.get(provider_key, "gemini_api_key")
-            self.backend.config.set('API', key_name, key)
             self.backend.config.set('Settings', 'llm_provider', provider_key)
 
-            # Save config file
+            # Only write key to INI as fallback if keychain is unavailable
+            if not stored_securely:
+                if not self.backend.config.has_section('API'):
+                    self.backend.config.add_section('API')
+                key_names = {
+                    "gemini": "gemini_api_key",
+                    "openai": "openai_api_key",
+                    "anthropic": "anthropic_api_key"
+                }
+                key_name = key_names.get(provider_key, "gemini_api_key")
+                self.backend.config.set('API', key_name, key)
+
+            # Save config file (settings only, no secrets if keychain worked)
             config_path = self.backend.config_path if hasattr(self.backend, 'config_path') else 'audio_config.ini'
             with open(config_path, 'w') as f:
                 self.backend.config.write(f)
 
             from ui.components.toast import ToastManager
-            ToastManager.success("API key saved successfully!")
+            if stored_securely:
+                ToastManager.success("API key saved securely to keychain!")
+            else:
+                ToastManager.success("API key saved (keychain unavailable, stored in config file)")
 
             # Mask the key
             self.api_key_entry.input.delete(0, "end")
@@ -476,7 +488,10 @@ class SettingsView(ctk.CTkFrame):
             widget.destroy()
 
         is_configured = False
-        if self.backend:
+        # Check keychain first, then config file
+        if secure_store.is_available and secure_store.get_api_key('gemini'):
+            is_configured = True
+        elif self.backend:
             config = getattr(self.backend, 'config', None)
             if config:
                 key = config.get('API', 'gemini_api_key', fallback='')

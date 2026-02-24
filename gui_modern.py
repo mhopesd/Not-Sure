@@ -6,12 +6,9 @@ import os
 import time
 import logging
 
-# Configure Logging
-logging.basicConfig(
-    filename='app_debug.log',
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Centralized logging is handled by app_logging.py (imported by backend).
+# Do NOT configure the root logger here — it would duplicate handlers and
+# set an overly verbose DEBUG level that could capture sensitive data.
 
 from backend import EnhancedAudioApp
 from ui.styles import ThemeManager, FONTS, RADIUS, SPACING
