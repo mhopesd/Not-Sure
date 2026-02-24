@@ -18,6 +18,9 @@ import requests
 # Use centralized logging
 from app_logging import logger
 
+# Secure credential storage (keychain)
+from secure_store import secure_store
+
 # Fix Google GenAI Import (New V1 SDK)
 try:
     from google import genai
@@ -92,8 +95,15 @@ class EnhancedAudioApp:
             "topic": ""
         }
         
+        # Resolve ffmpeg to absolute path once (prevents PATH manipulation attacks)
+        self._ffmpeg_path = shutil.which('ffmpeg')
+        if not self._ffmpeg_path:
+            logger.warning("ffmpeg not found in PATH — live transcription will be unavailable")
+        else:
+            logger.info(f"ffmpeg resolved to: {self._ffmpeg_path}")
+
         self.detect_devices()
-        
+
         # Preload model with slight delay to ensure UI loop is ready if it relies on callbacks immediately
         threading.Timer(1.0, self._preload_model).start()
 
@@ -122,6 +132,46 @@ class EnhancedAudioApp:
         if self.status_callback:
             self.status_callback(message)
 
+    def _get_api_key(self, provider: str) -> str:
+        """Get an API key, preferring keychain over config file.
+
+        Strips quotes that users sometimes add manually in config files.
+        """
+        # Try keychain first
+        key = secure_store.get_api_key(provider)
+        if key:
+            return key.strip()
+
+        # Fall back to config file
+        raw_key = self.config['API_KEYS'].get(provider, '')
+        return raw_key.strip().replace('"', '').replace("'", "")
+
+    def _migrate_keys_to_keychain(self):
+        """One-time migration: move API keys from plaintext config to keychain.
+
+        After migration, removes keys from the INI file and rewrites it.
+        """
+        if not secure_store.is_available:
+            return
+
+        migrated_any = False
+        for provider in ('openai', 'anthropic', 'gemini'):
+            raw_key = self.config['API_KEYS'].get(provider, '')
+            key = raw_key.strip().replace('"', '').replace("'", "")
+            if key and not secure_store.get_api_key(provider):
+                if secure_store.set_api_key(provider, key):
+                    self.config.set('API_KEYS', provider, '')
+                    migrated_any = True
+                    logger.info(f"Migrated {provider} API key to keychain")
+
+        if migrated_any:
+            try:
+                with open(self.config_file, 'w') as f:
+                    self.config.write(f)
+                logger.info("Cleared migrated keys from config file")
+            except Exception as e:
+                logger.error(f"Failed to rewrite config after migration: {e}")
+
     def load_config(self):
         self.config['API_KEYS'] = {'openai': '', 'anthropic': '', 'gemini': ''}
         self.config['SETTINGS'] = {
@@ -134,9 +184,25 @@ class EnhancedAudioApp:
         try:
             if os.path.exists(self.config_file):
                 self.config.read(self.config_file)
-                self.history_directory = self.config['SETTINGS'].get('history_directory', self.history_directory)
+
+                # Validate history_directory — must be under user's home
+                raw_dir = self.config['SETTINGS'].get('history_directory', self.history_directory)
+                resolved = os.path.realpath(os.path.expanduser(raw_dir))
+                home = os.path.expanduser("~")
+                if resolved.startswith(home):
+                    self.history_directory = resolved
+                else:
+                    logger.warning(
+                        "history_directory '%s' is outside home directory, "
+                        "falling back to default", raw_dir
+                    )
+                    self.history_directory = os.path.expanduser("~/Documents/Audio Recordings")
+
+            # Migrate plaintext keys to keychain (one-time, idempotent)
+            self._migrate_keys_to_keychain()
+
             self.auto_detect_llm()
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"Config warning: {e}")
 
     def auto_detect_llm(self):
@@ -147,7 +213,7 @@ class EnhancedAudioApp:
         for llm in llm_priority:
             if llm == 'ollama':
                 self.config['SETTINGS']['default_llm'] = 'ollama'; break
-            elif self.config['API_KEYS'].get(llm):
+            elif self._get_api_key(llm):
                 self.config['SETTINGS']['default_llm'] = llm; break
 
     def detect_devices(self):
@@ -188,9 +254,8 @@ class EnhancedAudioApp:
     def fetch_available_gemini_models(self):
         """Fetches available Gemini models using the Client pattern."""
         if not GOOGLE_GENAI_AVAILABLE: return []
-        
-        raw_key = self.config['API_KEYS'].get('gemini', '')
-        key = raw_key.strip().replace('"', '').replace("'", "")
+
+        key = self._get_api_key('gemini')
         if not key: return []
         
         try:
@@ -243,7 +308,7 @@ class EnhancedAudioApp:
             logger.error("Hybrid mode requested but 'BBrew Hybrid' device not found.")
             # Helper: Open Audio MIDI Setup
             try:
-                subprocess.run(['open', '-a', 'Audio MIDI Setup'])
+                subprocess.run(['/usr/bin/open', '-a', 'Audio MIDI Setup'])
             except Exception as e:
                 logger.error(f"Failed to open Audio MIDI Setup: {e}")
             return
@@ -293,12 +358,11 @@ class EnhancedAudioApp:
 
     def record_audio(self):
         SAMPLE_RATE = 16000 # Whisper prefers 16k
-        
-        temp_dir = tempfile.gettempdir()
-        # Atomic Write Strategy: Write to .part file
-        filename_base = f"rec_{datetime.now().strftime('%H%M%S')}"
-        self.temp_audio_file = os.path.join(temp_dir, f"{filename_base}.wav")
-        self.part_file = os.path.join(temp_dir, f"{filename_base}.part.wav")
+
+        # Use mkstemp for unpredictable filenames (prevents symlink attacks)
+        fd, self.temp_audio_file = tempfile.mkstemp(suffix='.wav', prefix='notsure_rec_')
+        os.close(fd)  # We'll reopen with wave module
+        self.part_file = self.temp_audio_file + '.part'
         logger.info(f"Writing audio to {self.part_file} (atomic)")
         
         q = queue.Queue()
@@ -351,22 +415,21 @@ class EnhancedAudioApp:
                             logger.error(f"Write error: {e}")
                             break
             
-            # Always try to rename if part file exists (even if no audio was captured)
-            if os.path.exists(self.part_file):
-                try:
-                    os.rename(self.part_file, self.temp_audio_file)
-                    logger.info(f"Renamed .part to {self.temp_audio_file} (success={success})")
-                except Exception as rename_err:
-                    logger.error(f"Failed to rename .part file: {rename_err}")
-                    # Fallback: try to copy instead
-                    try:
-                        shutil.copy2(self.part_file, self.temp_audio_file)
-                        os.remove(self.part_file)
-                        logger.info(f"Fallback: copied .part to {self.temp_audio_file}")
-                    except Exception as copy_err:
-                        logger.error(f"Fallback copy also failed: {copy_err}")
-            else:
+            # Atomically rename part file — no exists() check to avoid TOCTOU race
+            try:
+                os.rename(self.part_file, self.temp_audio_file)
+                logger.info(f"Renamed .part to {self.temp_audio_file} (success={success})")
+            except FileNotFoundError:
                 logger.warning(f"Part file does not exist: {self.part_file}")
+            except OSError as rename_err:
+                logger.error(f"Failed to rename .part file: {rename_err}")
+                # Fallback: try to copy instead
+                try:
+                    shutil.copy2(self.part_file, self.temp_audio_file)
+                    os.remove(self.part_file)
+                    logger.info(f"Fallback: copied .part to {self.temp_audio_file}")
+                except Exception as copy_err:
+                    logger.error(f"Fallback copy also failed: {copy_err}")
 
         except Exception as e:
             logger.error(f"Recording error: {e}")
@@ -406,11 +469,15 @@ class EnhancedAudioApp:
             # File grows, but header says 0 frames. Whisper needs valid header.
             # Use FFmpeg to copy/repair the stream to a temp file.
             try:
+                if not self._ffmpeg_path:
+                    logger.debug("Live transcribe: ffmpeg not available, skipping")
+                    break
+
                 temp_read_file = self.part_file + ".read.wav"
 
-                # Fast copy with header update using ffmpeg
+                # Fast copy with header update using ffmpeg (absolute path)
                 result = subprocess.run(
-                    ['ffmpeg', '-y', '-i', self.part_file, '-c', 'copy', temp_read_file],
+                    [self._ffmpeg_path, '-y', '-i', self.part_file, '-c', 'copy', temp_read_file],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     timeout=10
                 )
@@ -519,8 +586,7 @@ TRANSCRIPT (latest):
                 if not GOOGLE_GENAI_AVAILABLE:
                     logger.debug("Live insights: Gemini not available")
                     break
-                raw_key = self.config['API_KEYS'].get('gemini', '')
-                key = raw_key.strip().replace('"', '').replace("'", "")
+                key = self._get_api_key('gemini')
                 if not key:
                     logger.debug("Live insights: No Gemini API key")
                     break
@@ -640,12 +706,12 @@ TRANSCRIPT (latest):
         self.update_status("Finalizing Transcript...")
         try:
             if not self.whisper_model: self.whisper_model = whisper.load_model("base")
-        
+
             if os.path.getsize(self.temp_audio_file) < 4096:
                 raise AudioCaptureError("File too small - Audio subsystem failure detected")
 
             result = self.whisper_model.transcribe(self.temp_audio_file, fp16=False)
-            
+
             formatted_transcript = ""
             for segment in result['segments']:
                 start = self._format_time(segment['start'])
@@ -659,7 +725,7 @@ TRANSCRIPT (latest):
             self.update_status("Generating AI Summary...")
             # Pass the audio file path for cloud processing
             summary_data = self.generate_summary(formatted_transcript, self.temp_audio_file)
-            
+
             # Enrich with Metadata
             summary_data["start_time"] = self.recording_start_time.strftime("%I:%M %p") if self.recording_start_time else "?"
             summary_data["end_time"] = self.recording_end_time.strftime("%I:%M %p") if self.recording_end_time else "?"
@@ -673,6 +739,23 @@ TRANSCRIPT (latest):
             msg = f"Processing error: {str(e)}"
             self.update_status(msg)
             logger.error(f"{msg}\n{traceback.format_exc()}")
+        finally:
+            # Clean up temp files
+            for f in [self.temp_audio_file, self.part_file]:
+                try:
+                    if f and os.path.exists(f):
+                        os.remove(f)
+                        logger.debug(f"Cleaned up temp file: {f}")
+                except OSError:
+                    pass
+            # Also clean up any leftover .read.wav file
+            if self.part_file:
+                read_file = self.part_file + ".read.wav"
+                try:
+                    if os.path.exists(read_file):
+                        os.remove(read_file)
+                except OSError:
+                    pass
 
     def _format_time(self, seconds):
         m, s = divmod(int(seconds), 60)
@@ -692,13 +775,29 @@ TRANSCRIPT (latest):
         else:
             return self.error_summary(f"Unsupported LLM: {llm}", transcript)
 
+    def _safe_error_message(self, e: Exception) -> str:
+        """Sanitize exception messages before surfacing to the UI.
+
+        Logs the full error at ERROR level but returns a user-friendly message
+        that doesn't leak internal paths, API details, or key fragments.
+        """
+        err_str = str(e).lower()
+        if isinstance(e, requests.ConnectionError) or 'connection' in err_str:
+            return "Could not connect to the AI service"
+        if isinstance(e, requests.Timeout) or 'timeout' in err_str:
+            return "AI service timed out"
+        if 'api_key' in err_str or 'unauthorized' in err_str or '401' in err_str or 'forbidden' in err_str:
+            return "API authentication failed — check your API key in Settings"
+        if 'quota' in err_str or 'rate' in err_str or '429' in err_str:
+            return "API rate limit or quota exceeded — try again later"
+        # Generic fallback — real error logged, not shown to user
+        logger.error(f"API error details: {e}", exc_info=True)
+        return "An unexpected error occurred during AI processing"
+
     def _summarize_with_gemini(self, transcript, audio_path=None):
         if not GOOGLE_GENAI_AVAILABLE: return self.error_summary("Google GenAI Lib Missing", transcript)
-        
-        # Robustly get key, stripping quotes if user added them in config
-        raw_key = self.config['API_KEYS'].get('gemini', '')
-        key = raw_key.strip().replace('"', '').replace("'", "")
-        
+
+        key = self._get_api_key('gemini')
         if not key: return self.error_summary("Gemini API Key Missing", transcript)
 
         logger.info("Sending request to Gemini API (V1 SDK)...")
@@ -814,7 +913,7 @@ TRANSCRIPT (latest):
             return data
         except Exception as e:
             logger.error(f"Gemini API Error: {e}")
-            return self.error_summary(f"Gemini Error: {str(e)}", transcript)
+            return self.error_summary(f"Gemini Error: {self._safe_error_message(e)}", transcript)
 
     def error_summary(self, error_msg, transcript):
         return {"title": "Error Processing", "executive_summary": error_msg, "full_summary": "", "tasks": [], "transcript": transcript}
@@ -935,15 +1034,14 @@ Rules:
             }
         except Exception as e:
             logger.error(f"Ollama API error: {e}\n{traceback.format_exc()}")
-            return self.error_summary(f"Ollama error: {str(e)}", transcript)
+            return self.error_summary(f"Ollama error: {self._safe_error_message(e)}", transcript)
 
     def _summarize_with_openai(self, transcript, audio_path=None):
         """Summarize transcript using OpenAI API."""
         if not OPENAI_AVAILABLE:
             return self.error_summary("OpenAI library not installed (pip install openai)", transcript)
 
-        raw_key = self.config['API_KEYS'].get('openai', '')
-        key = raw_key.strip().replace('"', '').replace("'", "")
+        key = self._get_api_key('openai')
         if not key:
             return self.error_summary("OpenAI API Key Missing", transcript)
 
@@ -1010,18 +1108,17 @@ TRANSCRIPT:
 
         except json.JSONDecodeError as e:
             logger.error(f"OpenAI JSON parse error: {e}")
-            return self.error_summary(f"OpenAI returned invalid JSON: {str(e)}", transcript)
+            return self.error_summary("OpenAI returned invalid JSON", transcript)
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
-            return self.error_summary(f"OpenAI error: {str(e)}", transcript)
+            return self.error_summary(f"OpenAI error: {self._safe_error_message(e)}", transcript)
 
     def _summarize_with_anthropic(self, transcript, audio_path=None):
         """Summarize transcript using Anthropic API."""
         if not ANTHROPIC_AVAILABLE:
             return self.error_summary("Anthropic library not installed (pip install anthropic)", transcript)
 
-        raw_key = self.config['API_KEYS'].get('anthropic', '')
-        key = raw_key.strip().replace('"', '').replace("'", "")
+        key = self._get_api_key('anthropic')
         if not key:
             return self.error_summary("Anthropic API Key Missing", transcript)
 
@@ -1088,10 +1185,10 @@ TRANSCRIPT:
 
         except json.JSONDecodeError as e:
             logger.error(f"Anthropic JSON parse error: {e}")
-            return self.error_summary(f"Anthropic returned invalid JSON: {str(e)}", transcript)
+            return self.error_summary("Anthropic returned invalid JSON", transcript)
         except Exception as e:
             logger.error(f"Anthropic API error: {e}")
-            return self.error_summary(f"Anthropic error: {str(e)}", transcript)
+            return self.error_summary(f"Anthropic error: {self._safe_error_message(e)}", transcript)
 
     def save_to_history(self, transcript, summary_data):
         entry = summary_data if isinstance(summary_data, dict) else {"full_summary": str(summary_data)}
@@ -1177,9 +1274,7 @@ TRANSCRIPT:
         if not GOOGLE_GENAI_AVAILABLE:
             return "AI suggestions require Google GenAI library"
 
-        raw_key = self.config['API_KEYS'].get('gemini', '')
-        key = raw_key.strip().replace('"', '').replace("'", "")
-
+        key = self._get_api_key('gemini')
         if not key:
             return "Please configure your Gemini API key in settings"
 
@@ -1209,7 +1304,7 @@ TRANSCRIPT:
 
         except Exception as e:
             logger.error(f"Journal optimization error: {e}")
-            return f"Error generating suggestions: {str(e)}"
+            return f"Error generating suggestions: {self._safe_error_message(e)}"
 
     # --- SESSION MANAGEMENT ---
 

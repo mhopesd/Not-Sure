@@ -11,8 +11,11 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import asyncio
+import html as html_lib
 import json
 import os
+import secrets
+import time
 from datetime import datetime
 import threading
 import logging
@@ -23,6 +26,9 @@ from backend import EnhancedAudioApp
 
 # Import integrations
 from integrations import OAuthManager, MicrosoftIntegration, GoogleIntegration
+
+# Secure credential storage
+from secure_store import secure_store
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,10 @@ backend_app: Optional[EnhancedAudioApp] = None
 active_websockets: List[WebSocket] = []
 oauth_manager: Optional[OAuthManager] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+# OAuth CSRF state store: {state_token: expiry_timestamp}
+_oauth_states: dict[str, float] = {}
+_OAUTH_STATE_TTL = 600  # 10 minutes
 
 # Pydantic models
 class RecordingStartRequest(BaseModel):
@@ -642,34 +652,38 @@ async def update_settings(settings: SettingsUpdate):
     """Update app settings"""
     if not backend_app:
         raise HTTPException(status_code=503, detail="Backend not initialized")
-    
+
     # Update config file
     import configparser
     config_path = os.path.join(os.path.dirname(__file__), "audio_config.ini")
     config = configparser.ConfigParser()
-    
+
     if os.path.exists(config_path):
         config.read(config_path)
-    
-    # Use the correct section names from the backend
-    if not config.has_section("API_KEYS"):
-        config.add_section("API_KEYS")
+
     if not config.has_section("SETTINGS"):
         config.add_section("SETTINGS")
-    
+
+    # Store API key in keychain (secure), NOT in the config file
     if settings.gemini_api_key:
-        config.set("API_KEYS", "gemini", settings.gemini_api_key)
+        stored = secure_store.set_api_key("gemini", settings.gemini_api_key)
+        if not stored:
+            # Fallback: write to config file only if keychain unavailable
+            if not config.has_section("API_KEYS"):
+                config.add_section("API_KEYS")
+            config.set("API_KEYS", "gemini", settings.gemini_api_key)
+
     if settings.llm_provider:
         config.set("SETTINGS", "default_llm", settings.llm_provider)
     if settings.ollama_model:
         config.set("SETTINGS", "ollama_model", settings.ollama_model)
-    
+
     with open(config_path, "w") as f:
         config.write(f)
-    
+
     # Reload backend config
     backend_app.load_config()
-    
+
     return {"success": True, "message": "Settings updated"}
 
 # ==================== INTEGRATIONS ====================
@@ -742,6 +756,9 @@ def _ensure_valid_token(provider: str) -> str:
     return tokens["access_token"]
 
 
+# Allowed origins for postMessage (prevents cross-origin eavesdropping)
+_POST_MESSAGE_ORIGIN = "http://localhost:5173"
+
 # HTML page returned after OAuth callback — closes popup and notifies parent
 _OAUTH_SUCCESS_HTML = """
 <!DOCTYPE html>
@@ -755,7 +772,7 @@ _OAUTH_SUCCESS_HTML = """
   </div>
   <script>
     if (window.opener) {
-      window.opener.postMessage({ type: 'oauth_success', provider: '%PROVIDER%' }, '*');
+      window.opener.postMessage({ type: 'oauth_success', provider: '%PROVIDER%' }, '%ORIGIN%');
     }
     setTimeout(() => window.close(), 2000);
   </script>
@@ -775,13 +792,52 @@ _OAUTH_ERROR_HTML = """
   </div>
   <script>
     if (window.opener) {
-      window.opener.postMessage({ type: 'oauth_error', provider: '%PROVIDER%', error: '%ERROR%' }, '*');
+      window.opener.postMessage({ type: 'oauth_error', provider: '%PROVIDER%', error: '%ERROR%' }, '%ORIGIN%');
     }
     setTimeout(() => window.close(), 5000);
   </script>
 </body>
 </html>
 """
+
+
+def _generate_oauth_state(provider: str) -> str:
+    """Generate a cryptographically random state token for OAuth CSRF protection."""
+    # Clean up expired states
+    now = time.time()
+    expired = [k for k, v in _oauth_states.items() if v < now]
+    for k in expired:
+        del _oauth_states[k]
+
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = now + _OAUTH_STATE_TTL
+    return state
+
+
+def _validate_oauth_state(state: str | None) -> bool:
+    """Validate and consume an OAuth state token. Returns True if valid."""
+    if not state or state not in _oauth_states:
+        return False
+    expiry = _oauth_states.pop(state)
+    return time.time() < expiry
+
+
+def _render_oauth_success(provider: str) -> HTMLResponse:
+    """Render OAuth success HTML with safe values."""
+    html = (_OAUTH_SUCCESS_HTML
+            .replace("%PROVIDER%", html_lib.escape(provider))
+            .replace("%ORIGIN%", _POST_MESSAGE_ORIGIN))
+    return HTMLResponse(content=html)
+
+
+def _render_oauth_error(provider: str, error: str) -> HTMLResponse:
+    """Render OAuth error HTML with HTML-escaped error message (prevents XSS)."""
+    safe_error = html_lib.escape(str(error))
+    html = (_OAUTH_ERROR_HTML
+            .replace("%PROVIDER%", html_lib.escape(provider))
+            .replace("%ERROR%", safe_error)
+            .replace("%ORIGIN%", _POST_MESSAGE_ORIGIN))
+    return HTMLResponse(content=html)
 
 
 @app.put("/api/integrations/credentials")
@@ -819,10 +875,11 @@ async def microsoft_auth():
             detail="Microsoft credentials not configured. Please save your Client ID and Secret first."
         )
 
+    state = _generate_oauth_state("microsoft")
     auth_url = MicrosoftIntegration.get_auth_url(
         client_id=creds["client_id"],
         redirect_uri=MICROSOFT_REDIRECT_URI,
-        state="microsoft",
+        state=state,
     )
     return {"auth_url": auth_url}
 
@@ -831,12 +888,13 @@ async def microsoft_auth():
 async def microsoft_callback(code: str = None, error: str = None, state: str = None):
     """Handle Microsoft OAuth callback — exchanges code for tokens."""
     if error:
-        html = _OAUTH_ERROR_HTML.replace("%PROVIDER%", "microsoft").replace("%ERROR%", error)
-        return HTMLResponse(content=html)
+        return _render_oauth_error("microsoft", error)
 
     if not code:
-        html = _OAUTH_ERROR_HTML.replace("%PROVIDER%", "microsoft").replace("%ERROR%", "No authorization code received")
-        return HTMLResponse(content=html)
+        return _render_oauth_error("microsoft", "No authorization code received")
+
+    if not _validate_oauth_state(state):
+        return _render_oauth_error("microsoft", "Invalid or expired state — possible CSRF attack. Please try again.")
 
     try:
         creds = oauth_manager.get_credentials("microsoft")
@@ -852,12 +910,10 @@ async def microsoft_callback(code: str = None, error: str = None, state: str = N
         oauth_manager.save_tokens("microsoft", token_data)
         logger.info("Microsoft OAuth completed for %s", token_data.get("email"))
 
-        html = _OAUTH_SUCCESS_HTML.replace("%PROVIDER%", "microsoft")
-        return HTMLResponse(content=html)
+        return _render_oauth_success("microsoft")
     except Exception as e:
         logger.error("Microsoft OAuth error: %s", e)
-        html = _OAUTH_ERROR_HTML.replace("%PROVIDER%", "microsoft").replace("%ERROR%", str(e))
-        return HTMLResponse(content=html)
+        return _render_oauth_error("microsoft", str(e))
 
 
 @app.delete("/api/integrations/microsoft/disconnect")
@@ -884,10 +940,11 @@ async def google_auth():
             detail="Google credentials not configured. Please save your Client ID and Secret first."
         )
 
+    state = _generate_oauth_state("google")
     auth_url = GoogleIntegration.get_auth_url(
         client_id=creds["client_id"],
         redirect_uri=GOOGLE_REDIRECT_URI,
-        state="google",
+        state=state,
     )
     return {"auth_url": auth_url}
 
@@ -896,12 +953,13 @@ async def google_auth():
 async def google_callback(code: str = None, error: str = None, state: str = None):
     """Handle Google OAuth callback — exchanges code for tokens."""
     if error:
-        html = _OAUTH_ERROR_HTML.replace("%PROVIDER%", "google").replace("%ERROR%", error)
-        return HTMLResponse(content=html)
+        return _render_oauth_error("google", error)
 
     if not code:
-        html = _OAUTH_ERROR_HTML.replace("%PROVIDER%", "google").replace("%ERROR%", "No authorization code received")
-        return HTMLResponse(content=html)
+        return _render_oauth_error("google", "No authorization code received")
+
+    if not _validate_oauth_state(state):
+        return _render_oauth_error("google", "Invalid or expired state — possible CSRF attack. Please try again.")
 
     try:
         creds = oauth_manager.get_credentials("google")
@@ -917,12 +975,10 @@ async def google_callback(code: str = None, error: str = None, state: str = None
         oauth_manager.save_tokens("google", token_data)
         logger.info("Google OAuth completed for %s", token_data.get("email"))
 
-        html = _OAUTH_SUCCESS_HTML.replace("%PROVIDER%", "google")
-        return HTMLResponse(content=html)
+        return _render_oauth_success("google")
     except Exception as e:
         logger.error("Google OAuth error: %s", e)
-        html = _OAUTH_ERROR_HTML.replace("%PROVIDER%", "google").replace("%ERROR%", str(e))
-        return HTMLResponse(content=html)
+        return _render_oauth_error("google", str(e))
 
 
 @app.delete("/api/integrations/google/disconnect")
@@ -1046,4 +1102,4 @@ if __name__ == "__main__":
     import uvicorn
     print("Starting Audio Summary API server...")
     print("Frontend should connect to: http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
