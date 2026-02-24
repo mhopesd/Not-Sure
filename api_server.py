@@ -16,6 +16,7 @@ import os
 from datetime import datetime
 import threading
 import logging
+import requests as http_requests  # renamed to avoid clash with FastAPI Request
 
 # Import the existing backend
 from backend import EnhancedAudioApp
@@ -580,6 +581,20 @@ async def optimize_journal_entry(entry_id: str):
             "suggestions": suggestions
         }
     }
+
+# ==================== OLLAMA ====================
+
+@app.get("/api/ollama/health")
+async def ollama_health():
+    """Check if Ollama is running and list available models."""
+    try:
+        resp = http_requests.get("http://localhost:11434/api/tags", timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        models = [m["name"] for m in data.get("models", [])]
+        return {"running": True, "models": models}
+    except Exception:
+        return {"running": False, "models": []}
 
 # ==================== SETTINGS ====================
 

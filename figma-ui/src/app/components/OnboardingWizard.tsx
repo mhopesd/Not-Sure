@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { useIntegrations } from "../hooks/useIntegrations";
 // NotSure logo placeholder (Figma asset removed for standalone builds)
 const imgCanvas = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#1a1a2e"/><text x="32" y="40" text-anchor="middle" font-size="28" fill="#FFD100" font-family="sans-serif">?</text></svg>');
 import {
@@ -22,6 +23,7 @@ import {
   ExternalLink,
   Plug,
   Rocket,
+  Loader2,
 } from "lucide-react";
 
 const TOTAL_STEPS = 5;
@@ -87,17 +89,19 @@ interface IntegrationProps {
   color: string;
   connected: boolean;
   onToggle: () => void;
+  comingSoon?: boolean;
+  isConnecting?: boolean;
 }
 
-function IntegrationCard({ icon, name, desc, color, connected, onToggle }: IntegrationProps) {
+function IntegrationCard({ icon, name, desc, color, connected, onToggle, comingSoon, isConnecting }: IntegrationProps) {
   return (
     <div
       className="flex items-center gap-3 p-3 rounded-lg transition-colors"
-      style={{ background: "rgba(255,255,255,0.025)" }}
+      style={{ background: "rgba(255,255,255,0.025)", opacity: comingSoon ? 0.5 : 1 }}
     >
       <div
         className={ICON_COL}
-        style={{ background: `${color}18` }}
+        style={{ background: comingSoon ? "rgba(255,255,255,0.03)" : `${color}18` }}
       >
         {icon}
       </div>
@@ -105,25 +109,33 @@ function IntegrationCard({ icon, name, desc, color, connected, onToggle }: Integ
         <div className="text-[12px] text-white/85">{name}</div>
         <div className="text-[10px] text-white/35">{desc}</div>
       </div>
-      <button
-        onClick={onToggle}
-        className="px-3 py-1.5 rounded-md text-[11px] transition-all flex items-center gap-1"
-        style={{
-          background: connected ? `${color}18` : "rgba(255,255,255,0.04)",
-          color: connected ? color : "rgba(255,255,255,0.4)",
-          border: `1px solid ${connected ? `${color}30` : "rgba(255,255,255,0.06)"}`,
-        }}
-      >
-        {connected ? (
-          <>
-            <Check size={10} /> Connected
-          </>
-        ) : (
-          <>
-            <Plug size={10} /> Connect
-          </>
-        )}
-      </button>
+      {comingSoon ? (
+        <span
+          className="text-[9px] text-white/20 px-2 py-1 rounded-md"
+          style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)" }}
+        >
+          Coming Soon
+        </span>
+      ) : (
+        <button
+          onClick={onToggle}
+          disabled={isConnecting}
+          className="px-3 py-1.5 rounded-md text-[11px] transition-all flex items-center gap-1 disabled:opacity-40"
+          style={{
+            background: connected ? `${color}18` : "rgba(255,255,255,0.04)",
+            color: connected ? color : "rgba(255,255,255,0.4)",
+            border: `1px solid ${connected ? `${color}30` : "rgba(255,255,255,0.06)"}`,
+          }}
+        >
+          {isConnecting ? (
+            <><Loader2 size={10} className="animate-spin" /> Connecting...</>
+          ) : connected ? (
+            <><Check size={10} /> Connected</>
+          ) : (
+            <><Plug size={10} /> Connect</>
+          )}
+        </button>
+      )}
     </div>
   );
 }
@@ -146,14 +158,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
 
-  // Integrations state
-  const [integrations, setIntegrations] = useState({
-    calendar: false,
-    outlook: false,
-    notion: false,
-    slack: false,
-    linear: false,
-  });
+  // Integrations (wired to backend OAuth)
+  const oauthIntegrations = useIntegrations();
+  const googleConnected = oauthIntegrations.status?.google?.connected ?? false;
+  const microsoftConnected = oauthIntegrations.status?.microsoft?.connected ?? false;
+  const connectedCount = [googleConnected, microsoftConnected].filter(Boolean).length;
 
   const canProceed = useCallback(() => {
     if (step === 0) return true;
@@ -171,12 +180,6 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
   const prev = () => {
     if (step > 0) setStep(step - 1);
   };
-
-  const toggleIntegration = (key: keyof typeof integrations) => {
-    setIntegrations((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
-
-  const connectedCount = Object.values(integrations).filter(Boolean).length;
 
   return (
     <div className="flex h-full">
@@ -319,8 +322,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
               )}
               {step === 3 && (
                 <StepIntegrations
-                  integrations={integrations}
-                  toggleIntegration={toggleIntegration}
+                  integrations={oauthIntegrations}
                   connectedCount={connectedCount}
                 />
               )}
@@ -820,13 +822,15 @@ function StepAI({
    ══════════════════════════════════════════ */
 function StepIntegrations({
   integrations,
-  toggleIntegration,
   connectedCount,
 }: {
-  integrations: Record<string, boolean>;
-  toggleIntegration: (key: "calendar" | "outlook" | "notion" | "slack" | "linear") => void;
+  integrations: ReturnType<typeof useIntegrations>;
   connectedCount: number;
 }) {
+  const { status, connecting, error } = integrations;
+  const googleConnected = status?.google?.connected ?? false;
+  const microsoftConnected = status?.microsoft?.connected ?? false;
+
   return (
     <div className="flex flex-col justify-center h-full px-8">
       <div className="max-w-md mx-auto w-full">
@@ -844,6 +848,13 @@ function StepIntegrations({
             </p>
           </div>
         </div>
+
+        {/* Error banner */}
+        {error && (
+          <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg mt-3" style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.12)" }}>
+            <span className="text-[10px] text-red-400">{error}</span>
+          </div>
+        )}
 
         {/* Connected count */}
         <div
@@ -879,45 +890,53 @@ function StepIntegrations({
         </div>
 
         <div className="space-y-2">
+          {/* Wired: Google & Microsoft */}
           <IntegrationCard
             icon={<Calendar size={14} style={{ color: "#3b82f6" }} />}
             name="Google Calendar"
-            desc="Auto-detect meetings & attach recordings"
+            desc={googleConnected ? `Connected as ${status?.google?.email || "Google Account"}` : "Auto-detect meetings & attach recordings"}
             color="#3b82f6"
-            connected={integrations.calendar}
-            onToggle={() => toggleIntegration("calendar")}
+            connected={googleConnected}
+            onToggle={googleConnected ? integrations.disconnectGoogle : integrations.connectGoogle}
+            isConnecting={connecting === "google"}
           />
           <IntegrationCard
             icon={<CalendarDays size={14} style={{ color: "#0078d4" }} />}
             name="Outlook Calendar"
-            desc="Sync meetings from Microsoft 365"
+            desc={microsoftConnected ? `Connected as ${status?.microsoft?.email || "Microsoft Account"}` : "Sync meetings from Microsoft 365"}
             color="#0078d4"
-            connected={integrations.outlook}
-            onToggle={() => toggleIntegration("outlook")}
+            connected={microsoftConnected}
+            onToggle={microsoftConnected ? integrations.disconnectMicrosoft : integrations.connectMicrosoft}
+            isConnecting={connecting === "microsoft"}
           />
+
+          {/* Coming Soon: Notion, Slack, Linear */}
           <IntegrationCard
             icon={<FileText size={14} style={{ color: "#ffffff" }} />}
             name="Notion"
             desc="Export summaries & action items as pages"
             color="#ffffff"
-            connected={integrations.notion}
-            onToggle={() => toggleIntegration("notion")}
+            connected={false}
+            onToggle={() => {}}
+            comingSoon
           />
           <IntegrationCard
             icon={<MessageSquare size={14} style={{ color: "#e01e5a" }} />}
             name="Slack"
             desc="Post meeting summaries to channels"
             color="#e01e5a"
-            connected={integrations.slack}
-            onToggle={() => toggleIntegration("slack")}
+            connected={false}
+            onToggle={() => {}}
+            comingSoon
           />
           <IntegrationCard
             icon={<Zap size={14} style={{ color: "#5e6ad2" }} />}
             name="Linear"
             desc="Create issues from action items"
             color="#5e6ad2"
-            connected={integrations.linear}
-            onToggle={() => toggleIntegration("linear")}
+            connected={false}
+            onToggle={() => {}}
+            comingSoon
           />
         </div>
 
