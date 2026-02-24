@@ -45,6 +45,7 @@ app.add_middleware(
 backend_app: Optional[EnhancedAudioApp] = None
 active_websockets: List[WebSocket] = []
 oauth_manager: Optional[OAuthManager] = None
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Pydantic models
 class RecordingStartRequest(BaseModel):
@@ -96,7 +97,7 @@ async def broadcast_status(message: str):
     for ws in active_websockets:
         try:
             await ws.send_json({"type": "status", "message": message})
-        except:
+        except Exception:
             pass
 
 async def broadcast_transcript(text: str):
@@ -104,7 +105,7 @@ async def broadcast_transcript(text: str):
     for ws in active_websockets:
         try:
             await ws.send_json({"type": "transcript", "text": text})
-        except:
+        except Exception:
             pass
 
 async def broadcast_level(level: float):
@@ -112,7 +113,7 @@ async def broadcast_level(level: float):
     for ws in active_websockets:
         try:
             await ws.send_json({"type": "level", "value": level})
-        except:
+        except Exception:
             pass
 
 async def broadcast_live_summary(data: dict):
@@ -120,26 +121,32 @@ async def broadcast_live_summary(data: dict):
     for ws in active_websockets:
         try:
             await ws.send_json({"type": "live_summary", "data": data})
-        except:
+        except Exception:
             pass
 
-# Thread-safe status callback wrapper
+# Thread-safe callback wrappers — these are called from backend threads,
+# so we must use run_coroutine_threadsafe to schedule onto the event loop.
 def status_callback(message: str):
-    asyncio.create_task(broadcast_status(message))
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_status(message), _event_loop)
 
 def transcript_callback(text: str):
-    asyncio.create_task(broadcast_transcript(text))
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_transcript(text), _event_loop)
 
 def level_callback(level: float):
-    asyncio.create_task(broadcast_level(level))
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_level(level), _event_loop)
 
 def live_summary_callback(data: dict):
-    asyncio.create_task(broadcast_live_summary(data))
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_live_summary(data), _event_loop)
 
 @app.on_event("startup")
 async def startup():
     """Initialize the backend on server start"""
-    global backend_app, oauth_manager
+    global backend_app, oauth_manager, _event_loop
+    _event_loop = asyncio.get_running_loop()
     backend_app = EnhancedAudioApp()
     backend_app.summary_callback = live_summary_callback
     oauth_manager = OAuthManager()
@@ -224,7 +231,7 @@ async def recording_status():
         from datetime import datetime as dt
         duration = int((dt.now() - backend_app.recording_start_time).total_seconds())
     
-    insights = getattr(backend_app, 'live_insights', {})
+    insights = backend_app.get_live_insights() if hasattr(backend_app, 'get_live_insights') else {}
     return {
         "is_recording": backend_app.is_recording,
         "duration": duration,
@@ -240,7 +247,9 @@ async def recording_insights():
     if not backend_app:
         raise HTTPException(status_code=503, detail="Backend not initialized")
     
-    return getattr(backend_app, 'live_insights', {
+    if hasattr(backend_app, 'get_live_insights'):
+        return backend_app.get_live_insights()
+    return {
         "meeting_type": None,
         "confidence": 0,
         "key_points": [],
@@ -249,7 +258,7 @@ async def recording_insights():
         "sentiment": "neutral",
         "suggested_questions": [],
         "topic": ""
-    })
+    }
 
 # ==================== MEETINGS ====================
 
@@ -603,21 +612,21 @@ async def get_settings():
     try:
         gemini_key = config.get('API_KEYS', 'gemini', fallback='')
         has_gemini_key = bool(gemini_key and len(gemini_key) > 0)
-    except:
+    except Exception:
         pass
-    
+
     # Get LLM provider
     llm_provider = "gemini"
     try:
         llm_provider = config.get('SETTINGS', 'default_llm', fallback='gemini')
-    except:
+    except Exception:
         pass
-    
+
     # Get ollama model
     ollama_model = "llama3:8b"
     try:
         ollama_model = config.get('SETTINGS', 'ollama_model', fallback='llama3:8b')
-    except:
+    except Exception:
         pass
     
     return {

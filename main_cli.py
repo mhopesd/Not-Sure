@@ -7,14 +7,14 @@ Records audio, transcribes it locally with Whisper, and summarizes with Ollama
 import threading
 import wave
 import pyaudio
-import json
 import requests
 import whisper
 import os
 import tempfile
 from datetime import datetime
-import signal
 import sys
+
+from backend import EnhancedAudioApp
 
 
 class AudioSummaryCLI:
@@ -22,6 +22,8 @@ class AudioSummaryCLI:
         self.is_recording = False
         self.temp_audio_file = None
         self.whisper_model = None
+        # Use backend for summarization (shares Ollama implementation)
+        self.backend = EnhancedAudioApp()
         
     def record_audio(self):
         """Record audio from the microphone"""
@@ -109,47 +111,43 @@ class AudioSummaryCLI:
         return transcript
     
     def generate_summary(self, transcript):
-        """Generate summary using Ollama"""
+        """Generate summary using backend's Ollama integration"""
         print("Generating summary...")
-        
-        try:
-            url = "http://localhost:11434/api/generate"
-            
-            prompt = f"""You are an expert assistant who summarizes conversations. Please provide a concise summary of the following transcript. Focus on key decisions, main topics, and any action items mentioned.
 
-Transcript:
-"{transcript}"
+        # Use backend's Ollama implementation
+        result = self.backend._summarize_with_ollama(transcript)
 
-Summary:"""
-            
-            payload = {
-                "model": "llama3:8b",
-                "stream": False,
-                "prompt": prompt
-            }
-            
-            response = requests.post(url, json=payload, timeout=60)
-            response.raise_for_status()
-            
-            result = response.json()
-            summary = result.get("response", "No summary generated")
-            
-            print("\n" + "="*50)
-            print("SUMMARY:")
-            print("="*50)
-            print(summary)
-            print("="*50)
-            
-            return summary
-            
-        except requests.exceptions.ConnectionError:
-            error_msg = "Error: Could not connect to Ollama. Please ensure Ollama is running on localhost:11434"
-            print(f"\n{error_msg}")
+        # Check for error
+        if result.get("title") == "Error Processing":
+            error_msg = result.get("executive_summary", "Unknown error")
+            print(f"\nError: {error_msg}")
             return error_msg
-        except Exception as e:
-            error_msg = f"Error generating summary: {str(e)}"
-            print(f"\n{error_msg}")
-            return error_msg
+
+        # Format structured response for terminal
+        print("\n" + "="*50)
+        print(f"TITLE: {result.get('title', 'Meeting Summary')}")
+        print("="*50)
+
+        print("\nEXECUTIVE SUMMARY:")
+        print(result.get("executive_summary", "No summary available"))
+
+        highlights = result.get("highlights", [])
+        if highlights:
+            print("\nKEY HIGHLIGHTS:")
+            for i, point in enumerate(highlights, 1):
+                print(f"  {i}. {point}")
+
+        tasks = result.get("tasks", [])
+        if tasks:
+            print("\nACTION ITEMS:")
+            for task in tasks:
+                assignee = task.get("assignee") or "Unassigned"
+                due = task.get("due_date") or "No date"
+                print(f"  - {task.get('description', 'Task')} [{assignee}, {due}]")
+
+        print("="*50)
+
+        return result.get("executive_summary", "")
     
     def run(self):
         """Run the CLI application"""

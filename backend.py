@@ -27,6 +27,20 @@ except ImportError:
     GOOGLE_GENAI_AVAILABLE = False
     logger.warning("Google GenAI not installed (pip install google-genai).")
 
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    logger.warning("OpenAI not installed (pip install openai).")
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    logger.warning("Anthropic not installed (pip install anthropic).")
+
 import whisper
 
 class AudioCaptureError(Exception): pass
@@ -65,6 +79,7 @@ class EnhancedAudioApp:
         self.transcript_callback = transcript_callback
         self.level_callback = level_callback
         self.summary_callback = None  # Set by API server for live summary streaming
+        self._state_lock = threading.Lock()  # Protects live_transcript_text and live_insights
         self.live_transcript_text = ""  # Accumulated transcript for live summary
         self.live_insights = {           # Running insights state
             "meeting_type": None,
@@ -111,7 +126,10 @@ class EnhancedAudioApp:
         self.config['API_KEYS'] = {'openai': '', 'anthropic': '', 'gemini': ''}
         self.config['SETTINGS'] = {
             'history_directory': self.history_directory,
-            'default_llm': 'auto', 'ollama_model': 'llama3:8b'
+            'default_llm': 'auto',
+            'ollama_model': 'llama3:8b',
+            'openai_model': 'gpt-4o',
+            'anthropic_model': 'claude-sonnet-4-20250514'
         }
         try:
             if os.path.exists(self.config_file):
@@ -231,8 +249,9 @@ class EnhancedAudioApp:
             return
 
         self.is_recording = True
-        
-        self.live_transcript_text = ""  # Reset live transcript accumulator
+
+        with self._state_lock:
+            self.live_transcript_text = ""  # Reset live transcript accumulator
         
         self.recording_thread = threading.Thread(target=self.record_audio)
         self.recording_thread.start()
@@ -248,8 +267,8 @@ class EnhancedAudioApp:
         logger.info("Recording started.")
 
     def stop_recording(self):
-        # Guard against multiple calls
-        if not self.is_recording and hasattr(self, '_processing_audio') and self._processing_audio:
+        # Guard against multiple calls (e.g. double-click stop button)
+        if self._processing_audio:
             logger.warning("stop_recording() called but already processing - ignoring")
             return
 
@@ -297,7 +316,7 @@ class EnhancedAudioApp:
                     # Normalize: int16 max is 32768
                     norm_level = min(rms / 32768.0, 1.0)
                     self.level_callback(norm_level)
-                except: pass
+                except Exception: pass
 
             q.put(indata.copy())
 
@@ -381,7 +400,7 @@ class EnhancedAudioApp:
                 if file_size < 8000:  # Less than ~0.25 seconds of audio
                     logger.debug(f"Live transcribe: File too small ({file_size} bytes)")
                     continue
-            except:
+            except Exception:
                 continue
 
             # File grows, but header says 0 frames. Whisper needs valid header.
@@ -408,13 +427,14 @@ class EnhancedAudioApp:
 
                 if text and self.transcript_callback:
                     self.transcript_callback(text)
-                    self.live_transcript_text = text  # Update accumulated transcript
+                    with self._state_lock:
+                        self.live_transcript_text = text  # Update accumulated transcript
                 elif not text and self.transcript_callback:
                     self.transcript_callback("(Listening... no speech detected yet)")
 
                 try:
                     os.remove(temp_read_file)
-                except:
+                except Exception:
                     pass
 
             except subprocess.TimeoutExpired:
@@ -436,16 +456,17 @@ class EnhancedAudioApp:
         ollama_disabled = False  # auto-disable if Ollama is too slow
 
         # Reset insights for this recording session
-        self.live_insights = {
-            "meeting_type": None,
-            "confidence": 0,
-            "key_points": [],
-            "action_items": [],
-            "decisions": [],
-            "sentiment": "neutral",
-            "suggested_questions": [],
-            "topic": ""
-        }
+        with self._state_lock:
+            self.live_insights = {
+                "meeting_type": None,
+                "confidence": 0,
+                "key_points": [],
+                "action_items": [],
+                "decisions": [],
+                "sentiment": "neutral",
+                "suggested_questions": [],
+                "topic": ""
+            }
 
         # Determine interval: Ollama is slower, give it more time
         interval = 60 if llm == 'ollama' else 30
@@ -455,18 +476,22 @@ class EnhancedAudioApp:
 
         while self.is_recording:
             # Only proceed if we have transcript text
-            if not self.live_transcript_text or len(self.live_transcript_text.strip()) < 50:
+            with self._state_lock:
+                transcript_snapshot = self.live_transcript_text
+            if not transcript_snapshot or len(transcript_snapshot.strip()) < 50:
                 time.sleep(10)
                 continue
 
             # Build the shared prompt (same for both providers)
             prev_context = ""
             if summary_count > 0:
+                with self._state_lock:
+                    insights_snapshot = dict(self.live_insights)
                 prev_context = f"""\nPREVIOUS INSIGHTS (build on these, don't repeat):
-- Meeting type: {self.live_insights.get('meeting_type', 'unknown')}
-- Topic: {self.live_insights.get('topic', 'unknown')}
-- Action items so far: {json.dumps(self.live_insights.get('action_items', []))}
-- Decisions so far: {json.dumps(self.live_insights.get('decisions', []))}
+- Meeting type: {insights_snapshot.get('meeting_type', 'unknown')}
+- Topic: {insights_snapshot.get('topic', 'unknown')}
+- Action items so far: {json.dumps(insights_snapshot.get('action_items', []))}
+- Decisions so far: {json.dumps(insights_snapshot.get('decisions', []))}
 """
 
             prompt = f"""You are a real-time meeting analyst. Analyze this live conversation transcript and return structured insights.
@@ -485,7 +510,7 @@ Return ONLY a JSON object with these exact keys. For action_items, each item is 
 Include ALL action items and decisions from previous insights plus any new ones (deduplicated).
 {prev_context}
 TRANSCRIPT (latest):
-{self.live_transcript_text[-3000:]}"""
+{transcript_snapshot[-3000:]}"""
 
             data = None
 
@@ -511,6 +536,8 @@ TRANSCRIPT (latest):
                     if text.startswith("```json"): text = text[7:-3]
                     if text.startswith("```"): text = text[3:-3]
                     data = json.loads(text)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Live insights: Failed to parse Gemini JSON: {e}")
                 except Exception as e:
                     logger.debug(f"Live insights (Gemini) error (will retry): {e}")
 
@@ -547,7 +574,9 @@ TRANSCRIPT (latest):
 
             if data:
                 summary_count += 1
-                self.live_insights.update(data)
+                with self._state_lock:
+                    self.live_insights.update(data)
+
                 mt = data.get('meeting_type', '?')
                 n_actions = len(data.get('action_items', []))
                 n_decisions = len(data.get('decisions', []))
@@ -556,6 +585,7 @@ TRANSCRIPT (latest):
                     f"actions={n_actions}, decisions={n_decisions}, "
                     f"sentiment={data.get('sentiment', '?')}"
                 )
+
                 if self.summary_callback:
                     self.summary_callback(data)
 
@@ -566,6 +596,11 @@ TRANSCRIPT (latest):
                 time.sleep(1)
 
         logger.info(f"Live insights loop ended. Total updates: {summary_count}")
+
+    def get_live_insights(self):
+        """Thread-safe read of live_insights."""
+        with self._state_lock:
+            return dict(self.live_insights)
 
     def process_audio(self):
         logger.info("Processing logic started.")
@@ -646,16 +681,16 @@ TRANSCRIPT (latest):
     def generate_summary(self, transcript, audio_path=None):
         llm = self.config['SETTINGS'].get('default_llm', 'ollama')
         logger.info(f"Summarizing with {llm}")
-        if llm == 'gemini': return self._summarize_with_gemini(transcript, audio_path)
-        if llm == 'ollama': return self._summarize_with_ollama(transcript)
-        return {
-            "title": f"Meeting {datetime.now().strftime('%b %d')}",
-            "date": datetime.now().strftime("%b %d at %I:%M %p"),
-            "executive_summary": f"Summarization with '{llm}' is not yet supported. Please select Gemini or Ollama in Settings.",
-            "full_summary": "Configure your LLM provider in Settings → AI Configuration.",
-            "tasks": [],
-            "transcript": transcript
-        }
+        if llm == 'gemini':
+            return self._summarize_with_gemini(transcript, audio_path)
+        elif llm == 'ollama':
+            return self._summarize_with_ollama(transcript, audio_path)
+        elif llm == 'openai':
+            return self._summarize_with_openai(transcript, audio_path)
+        elif llm == 'anthropic':
+            return self._summarize_with_anthropic(transcript, audio_path)
+        else:
+            return self.error_summary(f"Unsupported LLM: {llm}", transcript)
 
     def _summarize_with_gemini(self, transcript, audio_path=None):
         if not GOOGLE_GENAI_AVAILABLE: return self.error_summary("Google GenAI Lib Missing", transcript)
@@ -753,8 +788,12 @@ TRANSCRIPT (latest):
             text = response.text.strip()
             if text.startswith("```json"): text = text[7:-3]
             if text.startswith("```"): text = text[3:-3]
-            
-            data = json.loads(text)
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse Gemini summary JSON: {e}")
+                return self.error_summary(f"Failed to parse AI response", transcript)
             data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
             data["transcript"] = transcript
             
@@ -777,8 +816,22 @@ TRANSCRIPT (latest):
             logger.error(f"Gemini API Error: {e}")
             return self.error_summary(f"Gemini Error: {str(e)}", transcript)
 
-    def _summarize_with_ollama(self, transcript):
-        """Summarize using a local Ollama model. Mirrors Gemini's structured JSON output."""
+    def error_summary(self, error_msg, transcript):
+        return {"title": "Error Processing", "executive_summary": error_msg, "full_summary": "", "tasks": [], "transcript": transcript}
+
+    def _summarize_with_ollama(self, transcript, audio_path=None):
+        """Summarize transcript using local Ollama LLM with structured JSON output."""
+        # Health check - verify Ollama is running
+        try:
+            health_response = requests.get("http://localhost:11434/api/tags", timeout=5)
+            health_response.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            return self.error_summary("Ollama not running. Start with: ollama serve", transcript)
+        except requests.exceptions.Timeout:
+            return self.error_summary("Ollama health check timed out", transcript)
+        except Exception as e:
+            return self.error_summary(f"Ollama connection error: {str(e)}", transcript)
+
         model = self.config['SETTINGS'].get('ollama_model', 'llama3:8b')
         logger.info(f"Sending request to Ollama (model: {model})...")
         self.update_status("AI Summarizing (Local)...")
@@ -831,15 +884,22 @@ Rules:
 
             result = response.json()
             text = result.get("response", "").strip()
+            logger.info(f"Ollama response length: {len(text)} chars")
 
             # Strip markdown fences if present
-            if text.startswith("```json"): text = text[7:-3]
-            if text.startswith("```"): text = text[3:-3]
+            if text.startswith("```json"): text = text[7:]
+            if text.startswith("```"): text = text[3:]
+            if text.endswith("```"): text = text[:-3]
             text = text.strip()
 
             data = json.loads(text)
             data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
             data["transcript"] = transcript
+
+            # Ensure required fields exist
+            if "tasks" not in data: data["tasks"] = []
+            if "highlights" not in data: data["highlights"] = []
+            if "full_summary_sections" not in data: data["full_summary_sections"] = []
 
             # Build enhanced transcript from diarized data if available
             if "diarized_transcript" in data and isinstance(data["diarized_transcript"], list) and len(data["diarized_transcript"]) > 0:
@@ -855,19 +915,15 @@ Rules:
                 data["diarized_transcript_text"] = "\n".join(diarized_lines)
                 logger.info(f"Ollama diarized transcript: {len(data['diarized_transcript'])} segments")
 
-            logger.info(f"Ollama summarization complete: {data.get('title', '?')}")
+            logger.info(f"Ollama summary generated: {data.get('title', 'No title')}")
             return data
 
-        except requests.exceptions.ConnectionError:
-            msg = "Ollama not running. Start it with: ollama serve"
-            logger.error(msg)
-            return self.error_summary(msg, transcript)
         except requests.exceptions.Timeout:
             msg = f"Ollama timed out after 180s (model: {model}). Try a smaller model."
             logger.error(msg)
             return self.error_summary(msg, transcript)
         except json.JSONDecodeError as e:
-            logger.error(f"Ollama returned invalid JSON: {e}\nRaw: {text[:500]}")
+            logger.error(f"Ollama JSON parse error: {e}, response: {text[:500] if text else 'empty'}")
             # Try to salvage a basic summary from the raw text
             return {
                 "title": f"Meeting {datetime.now().strftime('%b %d')}",
@@ -878,11 +934,164 @@ Rules:
                 "transcript": transcript,
             }
         except Exception as e:
-            logger.error(f"Ollama error: {e}\n{traceback.format_exc()}")
-            return self.error_summary(f"Ollama Error: {str(e)}", transcript)
+            logger.error(f"Ollama API error: {e}\n{traceback.format_exc()}")
+            return self.error_summary(f"Ollama error: {str(e)}", transcript)
 
-    def error_summary(self, error_msg, transcript):
-        return {"title": "Error Processing", "executive_summary": error_msg, "full_summary": "", "tasks": [], "transcript": transcript}
+    def _summarize_with_openai(self, transcript, audio_path=None):
+        """Summarize transcript using OpenAI API."""
+        if not OPENAI_AVAILABLE:
+            return self.error_summary("OpenAI library not installed (pip install openai)", transcript)
+
+        raw_key = self.config['API_KEYS'].get('openai', '')
+        key = raw_key.strip().replace('"', '').replace("'", "")
+        if not key:
+            return self.error_summary("OpenAI API Key Missing", transcript)
+
+        model = self.config['SETTINGS'].get('openai_model', 'gpt-4o')
+        logger.info(f"Using OpenAI model: {model}")
+
+        prompt = """You are an expert executive assistant. Analyze the following meeting transcript and return a structured JSON summary.
+
+Output ONLY a valid JSON object with this EXACT structure:
+{
+    "title": "Short descriptive title for the meeting",
+    "executive_summary": "2-3 sentence high-level summary of what was discussed",
+    "speaker_info": {
+        "count": 1,
+        "list": ["Speaker 1"]
+    },
+    "highlights": ["Key point 1", "Key point 2", "Key point 3"],
+    "full_summary_sections": [
+        {"header": "Main Topic", "content": "Details about this topic"}
+    ],
+    "tasks": [
+        {"description": "Action item description", "assignee": "Person name or null", "due_date": "Date or null"}
+    ]
+}
+
+TRANSCRIPT:
+""" + transcript
+
+        try:
+            self.update_status("AI Summarizing (OpenAI)...")
+            client = openai.OpenAI(api_key=key)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+
+            text = response.choices[0].message.content.strip()
+            logger.info(f"OpenAI response length: {len(text)} chars")
+
+            # Handle potential markdown wrappers
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+            data = json.loads(text)
+            data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
+            data["transcript"] = transcript
+
+            if "tasks" not in data:
+                data["tasks"] = []
+            if "highlights" not in data:
+                data["highlights"] = []
+            if "full_summary_sections" not in data:
+                data["full_summary_sections"] = []
+
+            logger.info(f"OpenAI summary generated: {data.get('title', 'No title')}")
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"OpenAI JSON parse error: {e}")
+            return self.error_summary(f"OpenAI returned invalid JSON: {str(e)}", transcript)
+        except Exception as e:
+            logger.error(f"OpenAI API error: {e}")
+            return self.error_summary(f"OpenAI error: {str(e)}", transcript)
+
+    def _summarize_with_anthropic(self, transcript, audio_path=None):
+        """Summarize transcript using Anthropic API."""
+        if not ANTHROPIC_AVAILABLE:
+            return self.error_summary("Anthropic library not installed (pip install anthropic)", transcript)
+
+        raw_key = self.config['API_KEYS'].get('anthropic', '')
+        key = raw_key.strip().replace('"', '').replace("'", "")
+        if not key:
+            return self.error_summary("Anthropic API Key Missing", transcript)
+
+        model = self.config['SETTINGS'].get('anthropic_model', 'claude-sonnet-4-20250514')
+        logger.info(f"Using Anthropic model: {model}")
+
+        prompt = """You are an expert executive assistant. Analyze the following meeting transcript and return a structured JSON summary.
+
+Output ONLY a valid JSON object with this EXACT structure (no markdown, no code blocks):
+{
+    "title": "Short descriptive title for the meeting",
+    "executive_summary": "2-3 sentence high-level summary of what was discussed",
+    "speaker_info": {
+        "count": 1,
+        "list": ["Speaker 1"]
+    },
+    "highlights": ["Key point 1", "Key point 2", "Key point 3"],
+    "full_summary_sections": [
+        {"header": "Main Topic", "content": "Details about this topic"}
+    ],
+    "tasks": [
+        {"description": "Action item description", "assignee": "Person name or null", "due_date": "Date or null"}
+    ]
+}
+
+TRANSCRIPT:
+""" + transcript
+
+        try:
+            self.update_status("AI Summarizing (Anthropic)...")
+            client = anthropic.Anthropic(api_key=key)
+
+            response = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            text = response.content[0].text.strip()
+            logger.info(f"Anthropic response length: {len(text)} chars")
+
+            # Handle potential markdown wrappers
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+            data = json.loads(text)
+            data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
+            data["transcript"] = transcript
+
+            if "tasks" not in data:
+                data["tasks"] = []
+            if "highlights" not in data:
+                data["highlights"] = []
+            if "full_summary_sections" not in data:
+                data["full_summary_sections"] = []
+
+            logger.info(f"Anthropic summary generated: {data.get('title', 'No title')}")
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Anthropic JSON parse error: {e}")
+            return self.error_summary(f"Anthropic returned invalid JSON: {str(e)}", transcript)
+        except Exception as e:
+            logger.error(f"Anthropic API error: {e}")
+            return self.error_summary(f"Anthropic error: {str(e)}", transcript)
 
     def save_to_history(self, transcript, summary_data):
         entry = summary_data if isinstance(summary_data, dict) else {"full_summary": str(summary_data)}
@@ -898,7 +1107,7 @@ Rules:
         if os.path.exists(self.history_file):
             try:
                 with open(self.history_file, 'r') as f: self.chat_history = json.load(f)
-            except: self.chat_history = []
+            except Exception: self.chat_history = []
 
     # --- JOURNAL SUPPORT ---
 
@@ -916,7 +1125,7 @@ Rules:
             try:
                 with open(self.journal_file, 'r') as f:
                     self.journal_entries = json.load(f)
-            except:
+            except Exception:
                 self.journal_entries = []
 
     def save_journal(self):
@@ -1018,7 +1227,7 @@ Rules:
             try:
                 with open(self.session_file, 'r') as f:
                     self.session = json.load(f)
-            except:
+            except Exception:
                 self.session = {}
 
     def save_session(self):
