@@ -4,6 +4,7 @@ from ui.components.cards import Card, MeetingCard, JournalCard
 from ui.components.inputs import StyledEntry, StyledLabel, StyledTextbox
 from ui.components.badges import Badge, SpeakerBadge, StatusBadge
 from ui.components.toast import ToastManager, show_toast
+from ui.components.coach_panel import CoachAlertsPanel
 
 __all__ = [
     # Buttons
@@ -27,4 +28,6 @@ __all__ = [
     # Toast
     "ToastManager",
     "show_toast",
+    # Coach
+    "CoachAlertsPanel",
 ]

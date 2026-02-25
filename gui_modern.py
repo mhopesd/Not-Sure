@@ -248,7 +248,8 @@ class PersonalAssistantApp(ctk.CTk):
             self.content_container,
             on_save_recording=self._save_meeting,
             on_start_recording=self._start_backend_recording,
-            on_stop_recording=self._stop_backend_recording
+            on_stop_recording=self._stop_backend_recording,
+            on_set_meeting_context=self._set_meeting_context
         )
 
         # Meetings view
@@ -315,6 +316,22 @@ class PersonalAssistantApp(ctk.CTk):
                 self.views["meetings"].update_meetings(self.audio_app.chat_history)
             elif tab_name == "journal" and self.audio_app:
                 self.views["journal"].update_entries(self.audio_app.get_journal_entries())
+
+    def _set_meeting_context(self, agenda, notes, duration):
+        """Set meeting context on the backend before recording starts"""
+        if self.audio_app:
+            self.audio_app.set_meeting_context(agenda, notes, duration)
+            self.audio_app.set_coach_enabled(True)
+            self.audio_app.coach_callback = self._update_coach_alerts
+
+    def _update_coach_alerts(self, alerts, agenda):
+        """Called from coach thread — marshal to UI thread."""
+        self.after(0, lambda: self._safe_update_coach(alerts, agenda))
+
+    def _safe_update_coach(self, alerts, agenda):
+        """Thread-safe coach alerts update"""
+        if "record" in self.views:
+            self.views["record"].update_coach_alerts(alerts, agenda)
 
     def _start_backend_recording(self):
         """Start the backend audio recording"""

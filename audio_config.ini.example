@@ -1,8 +1,8 @@
 [API_KEYS]
-openai = 
-anthropic = 
+openai =
+anthropic =
 # Get your Gemini API key from https://aistudio.google.com/app/apikey
-gemini = 
+gemini =
 
 [SETTINGS]
 # Where to save the audio files and history
@@ -11,3 +11,13 @@ history_directory = ~/Documents/Audio Recordings
 default_llm = gemini
 # Ollama model to use if selected (e.g. llama3, mistral)
 ollama_model = llama3:8b
+
+[COACH]
+# Enable live meeting coach (can also be toggled per-recording in the UI)
+enabled = true
+# RSS/web feed URLs for company context (comma-separated)
+feed_urls =
+# How often to refresh feeds (hours)
+feed_refresh_hours = 4
+# How often the coach analyzes transcript during recording (seconds)
+coach_interval = 30

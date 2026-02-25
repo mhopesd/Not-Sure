@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import traceback
 import requests
+import uuid
 
 # Use centralized logging
 from app_logging import logger
@@ -94,7 +95,19 @@ class EnhancedAudioApp:
             "suggested_questions": [],
             "topic": ""
         }
-        
+
+
+        # Meeting Coach state (protected by self._state_lock)
+        self.meeting_context = {
+            "agenda": [],
+            "notes": "",
+            "expected_duration_minutes": None,
+            "company_context": []
+        }
+        self.coach_alerts = []
+        self.coach_callback = None  # Called when new alerts arrive (UI updates)
+        self._coach_enabled = False
+
         # Resolve ffmpeg to absolute path once (prevents PATH manipulation attacks)
         self._ffmpeg_path = shutil.which('ffmpeg')
         if not self._ffmpeg_path:
@@ -180,6 +193,12 @@ class EnhancedAudioApp:
             'ollama_model': 'llama3:8b',
             'openai_model': 'gpt-4o',
             'anthropic_model': 'claude-sonnet-4-20250514'
+        }
+        self.config['COACH'] = {
+            'enabled': 'true',
+            'feed_urls': '',
+            'feed_refresh_hours': '4',
+            'coach_interval': '30'
         }
         try:
             if os.path.exists(self.config_file):
@@ -327,6 +346,12 @@ class EnhancedAudioApp:
         self.summary_thread = threading.Thread(target=self.live_summary_loop)
         self.summary_thread.start()
 
+        # Start coach thread if enabled
+        self.coach_thread = None
+        if self._coach_enabled:
+            self.coach_thread = threading.Thread(target=self.live_coach_loop)
+            self.coach_thread.start()
+
         self.recording_start_time = datetime.now()
         self.update_status("● Initializing...")
         logger.info("Recording started.")
@@ -352,6 +377,10 @@ class EnhancedAudioApp:
                 self.transcription_thread.join(timeout=3.0)
             if hasattr(self, 'summary_thread') and self.summary_thread:
                 self.summary_thread.join(timeout=3.0)
+            if hasattr(self, 'coach_thread') and self.coach_thread:
+                self.coach_thread.join(timeout=3.0)
+            # Clean up coach state after threads are done
+            self._coach_enabled = False
             self.process_audio()
         finally:
             self._processing_audio = False
@@ -511,6 +540,121 @@ class EnhancedAudioApp:
 
         logger.info(f"Live transcription loop ended. Total transcriptions: {transcribe_count}")
 
+    def _call_llm_json(self, prompt, llm=None):
+        """Send a prompt to the configured LLM and return parsed JSON dict.
+
+        Returns (data, meta) where data is the parsed dict (or None on failure)
+        and meta is a dict with optional info like {'elapsed': float, 'error': str}.
+        """
+        if llm is None:
+            llm = self.config['SETTINGS'].get('default_llm', 'ollama')
+        meta = {}
+
+        if llm == 'gemini':
+            if not GOOGLE_GENAI_AVAILABLE:
+                return None, {"error": "gemini_unavailable"}
+            key = self._get_api_key('gemini')
+            if not key:
+                return None, {"error": "gemini_no_key"}
+            try:
+                client = genai.Client(api_key=key)
+                selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
+                response = client.models.generate_content(
+                    model=selected_model,
+                    contents=[prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                text = response.text.strip()
+                if text.startswith("```json"): text = text[7:-3]
+                if text.startswith("```"): text = text[3:-3]
+                return json.loads(text), meta
+            except json.JSONDecodeError as e:
+                logger.warning(f"_call_llm_json: Gemini JSON parse error: {e}")
+                return None, {"error": "json_parse"}
+            except Exception as e:
+                logger.debug(f"_call_llm_json: Gemini error: {e}")
+                return None, {"error": str(e)}
+
+        elif llm == 'ollama':
+            model = self.config['SETTINGS'].get('ollama_model', 'llama3:8b')
+            try:
+                start_t = time.time()
+                resp = requests.post(
+                    "http://localhost:11434/api/generate",
+                    json={"model": model, "stream": False, "prompt": prompt, "format": "json"},
+                    timeout=90,
+                )
+                elapsed_t = time.time() - start_t
+                meta["elapsed"] = elapsed_t
+                resp.raise_for_status()
+                text = resp.json().get("response", "").strip()
+                if text.startswith("```json"): text = text[7:-3]
+                if text.startswith("```"): text = text[3:-3]
+                return json.loads(text), meta
+            except requests.exceptions.ConnectionError:
+                return None, {"error": "ollama_not_running"}
+            except json.JSONDecodeError as e:
+                logger.warning(f"_call_llm_json: Ollama JSON parse error: {e}")
+                return None, {"error": "json_parse"}
+            except Exception as e:
+                logger.debug(f"_call_llm_json: Ollama error: {e}")
+                return None, {"error": str(e)}
+
+        elif llm == 'openai':
+            if not OPENAI_AVAILABLE:
+                return None, {"error": "openai_unavailable"}
+            key = self._get_api_key('openai')
+            if not key:
+                return None, {"error": "openai_no_key"}
+            try:
+                model = self.config['SETTINGS'].get('openai_model', 'gpt-4o')
+                client = openai.OpenAI(api_key=key)
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"}
+                )
+                text = response.choices[0].message.content.strip()
+                if text.startswith("```json"): text = text[7:-3]
+                if text.startswith("```"): text = text[3:-3]
+                text = text.strip()
+                return json.loads(text), meta
+            except json.JSONDecodeError as e:
+                logger.warning(f"_call_llm_json: OpenAI JSON parse error: {e}")
+                return None, {"error": "json_parse"}
+            except Exception as e:
+                logger.debug(f"_call_llm_json: OpenAI error: {e}")
+                return None, {"error": str(e)}
+
+        elif llm == 'anthropic':
+            if not ANTHROPIC_AVAILABLE:
+                return None, {"error": "anthropic_unavailable"}
+            key = self._get_api_key('anthropic')
+            if not key:
+                return None, {"error": "anthropic_no_key"}
+            try:
+                model = self.config['SETTINGS'].get('anthropic_model', 'claude-sonnet-4-20250514')
+                client = anthropic.Anthropic(api_key=key)
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=4096,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                text = response.content[0].text.strip()
+                if text.startswith("```json"): text = text[7:-3]
+                if text.startswith("```"): text = text[3:-3]
+                text = text.strip()
+                return json.loads(text), meta
+            except json.JSONDecodeError as e:
+                logger.warning(f"_call_llm_json: Anthropic JSON parse error: {e}")
+                return None, {"error": "json_parse"}
+            except Exception as e:
+                logger.debug(f"_call_llm_json: Anthropic error: {e}")
+                return None, {"error": str(e)}
+
+        else:
+            return None, {"error": f"unsupported_provider_{llm}"}
+
     def live_summary_loop(self):
         """Real-time conversation intelligence via Gemini or Ollama.
 
@@ -581,62 +725,26 @@ TRANSCRIPT (latest):
 
             data = None
 
-            if llm == 'gemini':
-                # ── Gemini path ──
-                if not GOOGLE_GENAI_AVAILABLE:
-                    logger.debug("Live insights: Gemini not available")
-                    break
-                key = self._get_api_key('gemini')
-                if not key:
-                    logger.debug("Live insights: No Gemini API key")
-                    break
-                try:
-                    client = genai.Client(api_key=key)
-                    selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
-                    response = client.models.generate_content(
-                        model=selected_model,
-                        contents=[prompt],
-                        config=types.GenerateContentConfig(response_mime_type="application/json")
-                    )
-                    text = response.text.strip()
-                    if text.startswith("```json"): text = text[7:-3]
-                    if text.startswith("```"): text = text[3:-3]
-                    data = json.loads(text)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Live insights: Failed to parse Gemini JSON: {e}")
-                except Exception as e:
-                    logger.debug(f"Live insights (Gemini) error (will retry): {e}")
-
-            elif llm == 'ollama' and not ollama_disabled:
-                # ── Ollama path ──
-                model = self.config['SETTINGS'].get('ollama_model', 'llama3:8b')
-                try:
-                    start_t = time.time()
-                    resp = requests.post(
-                        "http://localhost:11434/api/generate",
-                        json={"model": model, "stream": False, "prompt": prompt, "format": "json"},
-                        timeout=90,
-                    )
-                    elapsed_t = time.time() - start_t
-                    resp.raise_for_status()
-                    text = resp.json().get("response", "").strip()
-                    if text.startswith("```json"): text = text[7:-3]
-                    if text.startswith("```"): text = text[3:-3]
-                    data = json.loads(text)
-
-                    # Auto-disable if Ollama is too slow for live use
-                    if elapsed_t > 45:
-                        logger.warning(f"Live insights: Ollama took {elapsed_t:.0f}s — disabling live insights to avoid lag.")
-                        ollama_disabled = True
-                except requests.exceptions.ConnectionError:
-                    logger.debug("Live insights: Ollama not running, disabling live insights.")
-                    break
-                except Exception as e:
-                    logger.debug(f"Live insights (Ollama) error (will retry): {e}")
-            else:
-                # Unsupported provider for live insights
-                logger.info(f"Live insights: provider '{llm}' not supported for live insights.")
+            if llm == 'ollama' and ollama_disabled:
                 break
+
+            data, meta = self._call_llm_json(prompt, llm)
+
+            # Handle fatal errors that mean we should stop the loop
+            if meta.get("error") in ("gemini_unavailable", "gemini_no_key",
+                                      "ollama_not_running", "openai_unavailable",
+                                      "openai_no_key", "anthropic_unavailable",
+                                      "anthropic_no_key"):
+                logger.info(f"Live insights: stopping due to {meta['error']}")
+                break
+            if meta.get("error", "").startswith("unsupported_provider"):
+                logger.info(f"Live insights: provider '{llm}' not supported.")
+                break
+
+            # Auto-disable Ollama if too slow
+            if llm == 'ollama' and meta.get("elapsed", 0) > 45:
+                logger.warning(f"Live insights: Ollama took {meta['elapsed']:.0f}s — disabling.")
+                ollama_disabled = True
 
             if data:
                 summary_count += 1
@@ -667,6 +775,234 @@ TRANSCRIPT (latest):
         """Thread-safe read of live_insights."""
         with self._state_lock:
             return dict(self.live_insights)
+
+    # --- Meeting Coach Methods ---
+
+    def set_meeting_context(self, agenda_items, notes, duration_minutes=None):
+        """Set meeting context before recording starts."""
+        with self._state_lock:
+            self.meeting_context = {
+                "agenda": [{"text": item, "covered": False, "time_mentioned": None} for item in agenda_items],
+                "notes": notes,
+                "expected_duration_minutes": duration_minutes,
+                "company_context": self._get_cached_feed_context()
+            }
+            self.coach_alerts = []
+
+    def set_coach_enabled(self, enabled):
+        """Enable or disable the meeting coach."""
+        self._coach_enabled = enabled
+
+    def get_coach_alerts(self):
+        """Thread-safe read of coach_alerts."""
+        with self._state_lock:
+            return list(self.coach_alerts)
+
+    def _get_cached_feed_context(self):
+        """Get feed context strings, refreshing cache if stale."""
+        try:
+            from feed_fetcher import FeedFetcher
+            if not hasattr(self, 'feed_fetcher'):
+                self.feed_fetcher = FeedFetcher(config=self.config)
+            urls_str = self.config.get('COACH', 'feed_urls', fallback='')
+            urls = [u.strip() for u in urls_str.split(',') if u.strip()]
+            if urls:
+                self.feed_fetcher.refresh_if_needed(urls)
+            return self.feed_fetcher.get_context_strings()
+        except Exception as e:
+            logger.debug(f"Feed context unavailable: {e}")
+            return []
+
+    def _build_coach_prompt(self, transcript, context, existing_alerts):
+        """Build the LLM prompt for the meeting coach."""
+        agenda_text = "\n".join([
+            f"- {'[COVERED]' if item['covered'] else '[NOT YET]'} {item['text']}"
+            for item in context.get("agenda", [])
+        ]) or "(No agenda provided)"
+
+        notes_text = context.get("notes", "").strip() or "(No notes provided)"
+
+        company_ctx = "\n".join(context.get("company_context", [])) or "(No company context)"
+
+        existing_summary = "\n".join([
+            f"- [{a.get('timestamp', '??:??')}] {a.get('type', 'unknown')}: {a.get('message', '')}"
+            for a in existing_alerts[-5:]
+        ]) or "(No previous alerts)"
+
+        return f"""You are a real-time meeting coach. Your job is to help the meeting participant stay on track and surface relevant information.
+
+MEETING AGENDA:
+{agenda_text}
+
+PRE-MEETING NOTES:
+{notes_text}
+
+COMPANY CONTEXT (recent news/updates):
+{company_ctx}
+
+PREVIOUS ALERTS (do not repeat these):
+{existing_summary}
+
+CURRENT TRANSCRIPT (latest):
+{transcript[-3000:]}
+
+Analyze the conversation and return a JSON object:
+{{
+    "alerts": [
+        {{
+            "type": "off_topic|agenda_covered|agenda_missing|suggestion|context_ref|time_warning",
+            "severity": "info|warning|critical",
+            "message": "Short actionable message (1-2 sentences)",
+            "agenda_item": "which agenda item this relates to, or null"
+        }}
+    ],
+    "agenda_status": [
+        {{
+            "text": "exact text of agenda item",
+            "covered": true
+        }}
+    ]
+}}
+
+Rules:
+- Only generate NEW alerts not already in "PREVIOUS ALERTS"
+- "off_topic": conversation strayed significantly from all agenda items
+- "agenda_covered": an agenda item was adequately discussed (severity: info)
+- "agenda_missing": meeting is progressing but a key agenda item hasn't been touched (severity: warning)
+- "suggestion": a helpful question or redirect to bring conversation back on track
+- "context_ref": something said connects to or contradicts company context (cite it)
+- Keep alerts concise and actionable
+- Return empty alerts array if nothing noteworthy happened since last check
+- For agenda_status, only include items whose coverage status changed"""
+
+    def _check_time_warnings(self):
+        """Generate time-based alerts without needing LLM."""
+        with self._state_lock:
+            expected = self.meeting_context.get("expected_duration_minutes")
+        if not expected or not self.recording_start_time:
+            return
+
+        elapsed_minutes = (datetime.now() - self.recording_start_time).total_seconds() / 60
+
+        thresholds = [
+            (0.75, "info", f"75% of planned time used ({int(elapsed_minutes)}m / {expected}m)"),
+            (0.90, "warning", f"90% of planned time used ({int(elapsed_minutes)}m / {expected}m). Consider wrapping up."),
+            (1.00, "critical", f"Meeting has exceeded planned duration of {expected}m."),
+        ]
+
+        for pct, severity, msg in thresholds:
+            if elapsed_minutes >= expected * pct:
+                alert_key = f"time_{int(pct * 100)}"
+                with self._state_lock:
+                    already_fired = any(a.get("id", "").startswith(alert_key) for a in self.coach_alerts)
+                if not already_fired:
+                    m, s = divmod(int(elapsed_minutes * 60), 60)
+                    alert = {
+                        "id": alert_key,
+                        "timestamp": f"{m:02d}:{s:02d}",
+                        "type": "time_warning",
+                        "severity": severity,
+                        "message": msg,
+                        "agenda_item": None,
+                        "source": "coach"
+                    }
+                    with self._state_lock:
+                        self.coach_alerts.append(alert)
+                    if self.coach_callback:
+                        with self._state_lock:
+                            alerts_copy = list(self.coach_alerts)
+                            agenda_copy = list(self.meeting_context.get("agenda", []))
+                        self.coach_callback(alerts_copy, agenda_copy)
+
+    def live_coach_loop(self):
+        """Real-time meeting coaching: off-topic detection, agenda tracking, time warnings."""
+        llm = self.config['SETTINGS'].get('default_llm', 'ollama')
+        logger.info(f"Live coach loop started (provider: {llm}).")
+        coach_count = 0
+
+        try:
+            interval = int(self.config.get('COACH', 'coach_interval', fallback='30'))
+        except (ValueError, configparser.Error):
+            interval = 30
+
+        # Wait before first analysis
+        time.sleep(interval)
+
+        while self.is_recording:
+            with self._state_lock:
+                transcript_snapshot = self.live_transcript_text
+                context_snapshot = {
+                    "agenda": [dict(item) for item in self.meeting_context.get("agenda", [])],
+                    "notes": self.meeting_context.get("notes", ""),
+                    "expected_duration_minutes": self.meeting_context.get("expected_duration_minutes"),
+                    "company_context": list(self.meeting_context.get("company_context", []))
+                }
+                existing_alerts = list(self.coach_alerts)
+
+            if not transcript_snapshot or len(transcript_snapshot.strip()) < 50:
+                time.sleep(10)
+                continue
+
+            prompt = self._build_coach_prompt(transcript_snapshot, context_snapshot, existing_alerts)
+            data, meta = self._call_llm_json(prompt, llm)
+
+            # If provider is fatally unavailable, stop the loop
+            if meta.get("error") in ("gemini_unavailable", "gemini_no_key",
+                                      "ollama_not_running", "openai_unavailable",
+                                      "openai_no_key", "anthropic_unavailable",
+                                      "anthropic_no_key"):
+                logger.info(f"Live coach: stopping due to {meta['error']}")
+                break
+            if meta.get("error", "").startswith("unsupported_provider"):
+                logger.info(f"Live coach: provider '{llm}' not supported.")
+                break
+
+            if data:
+                coach_count += 1
+                new_alerts = data.get("alerts", [])
+                agenda_updates = data.get("agenda_status", [])
+
+                with self._state_lock:
+                    # Append new alerts
+                    for alert in new_alerts:
+                        alert["id"] = uuid.uuid4().hex[:8]
+                        alert["source"] = "coach"
+                        if self.recording_start_time:
+                            elapsed = (datetime.now() - self.recording_start_time).total_seconds()
+                            m, s = divmod(int(elapsed), 60)
+                            alert["timestamp"] = f"{m:02d}:{s:02d}"
+                        self.coach_alerts.append(alert)
+
+                    # Update agenda coverage
+                    for status in agenda_updates:
+                        for item in self.meeting_context.get("agenda", []):
+                            if item["text"] == status.get("text") and status.get("covered"):
+                                if not item["covered"]:
+                                    item["covered"] = True
+                                    if self.recording_start_time:
+                                        elapsed = (datetime.now() - self.recording_start_time).total_seconds()
+                                        m, s = divmod(int(elapsed), 60)
+                                        item["time_mentioned"] = f"{m:02d}:{s:02d}"
+
+                # Fire callback for UI
+                if self.coach_callback:
+                    with self._state_lock:
+                        alerts_copy = list(self.coach_alerts)
+                        agenda_copy = list(self.meeting_context.get("agenda", []))
+                    self.coach_callback(alerts_copy, agenda_copy)
+
+                logger.info(f"Coach #{coach_count}: {len(new_alerts)} new alerts")
+
+            # Check time-based warnings (no LLM needed)
+            self._check_time_warnings()
+
+            # Sleep in 1-second increments for responsiveness
+            for _ in range(interval):
+                if not self.is_recording:
+                    break
+                time.sleep(1)
+
+        logger.info(f"Live coach loop ended. Total updates: {coach_count}")
 
     def process_audio(self):
         logger.info("Processing logic started.")

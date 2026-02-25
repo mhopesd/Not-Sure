@@ -2,7 +2,7 @@
 import customtkinter as ctk
 from ui.styles import ThemeManager, FONTS, RADIUS, SPACING
 from ui.components.buttons import PrimaryButton, OutlineButton, DestructiveButton
-from ui.components.inputs import StyledEntry, StyledLabel, PasswordEntry, FormField
+from ui.components.inputs import StyledEntry, StyledLabel, StyledTextbox, PasswordEntry, FormField
 from ui.components.badges import Badge
 from secure_store import secure_store
 
@@ -55,6 +55,9 @@ class SettingsView(ctk.CTkFrame):
 
         # Calendar Integration section (placeholder)
         self._create_calendar_section()
+
+        # Meeting Coach section
+        self._create_coach_section()
 
         # About section
         self._create_about_section()
@@ -272,6 +275,135 @@ class SettingsView(ctk.CTkFrame):
             text="Google Calendar and Outlook integration coming in a future update",
             variant="caption"
         ).pack(side="left", padx=SPACING["md"])
+
+    def _create_coach_section(self):
+        """Create meeting coach configuration section"""
+        colors = ThemeManager.get_colors()
+
+        content = self._create_section_card(
+            "Meeting Coach",
+            "Configure live meeting coaching and company context feeds"
+        )
+
+        # Feed URLs
+        feed_frame = ctk.CTkFrame(content, fg_color="transparent")
+        feed_frame.pack(fill="x", pady=(SPACING["md"], SPACING["sm"]))
+
+        StyledLabel(
+            feed_frame,
+            text="RSS Feed URLs (one per line)",
+            variant="label"
+        ).pack(anchor="w", pady=(0, SPACING["xs"]))
+
+        self.feed_urls_textbox = StyledTextbox(
+            feed_frame,
+            height=80
+        )
+        self.feed_urls_textbox.pack(fill="x")
+
+        # Load existing feed URLs
+        if self.backend:
+            config = getattr(self.backend, 'config', None)
+            if config:
+                urls = config.get('COACH', 'feed_urls', fallback='')
+                if urls:
+                    # Convert comma-separated to newline-separated for display
+                    url_lines = "\n".join(u.strip() for u in urls.split(",") if u.strip())
+                    self.feed_urls_textbox.insert("1.0", url_lines)
+
+        # Intervals row
+        intervals_frame = ctk.CTkFrame(content, fg_color="transparent")
+        intervals_frame.pack(fill="x", pady=(0, SPACING["sm"]))
+
+        # Feed refresh interval
+        refresh_row = ctk.CTkFrame(intervals_frame, fg_color="transparent")
+        refresh_row.pack(fill="x", pady=SPACING["xs"])
+
+        StyledLabel(
+            refresh_row,
+            text="Feed Refresh Interval (hours)",
+            variant="label"
+        ).pack(side="left")
+
+        self.feed_refresh_entry = StyledEntry(
+            refresh_row,
+            placeholder="4",
+            width=80
+        )
+        self.feed_refresh_entry.pack(side="right")
+
+        # Load existing value
+        if self.backend:
+            config = getattr(self.backend, 'config', None)
+            if config:
+                val = config.get('COACH', 'feed_refresh_hours', fallback='4')
+                self.feed_refresh_entry.insert(0, val)
+
+        # Coach analysis interval
+        coach_row = ctk.CTkFrame(intervals_frame, fg_color="transparent")
+        coach_row.pack(fill="x", pady=SPACING["xs"])
+
+        StyledLabel(
+            coach_row,
+            text="Coach Analysis Interval (seconds)",
+            variant="label"
+        ).pack(side="left")
+
+        self.coach_interval_entry = StyledEntry(
+            coach_row,
+            placeholder="30",
+            width=80
+        )
+        self.coach_interval_entry.pack(side="right")
+
+        # Load existing value
+        if self.backend:
+            config = getattr(self.backend, 'config', None)
+            if config:
+                val = config.get('COACH', 'coach_interval', fallback='30')
+                self.coach_interval_entry.insert(0, val)
+
+        # Save button
+        save_frame = ctk.CTkFrame(content, fg_color="transparent")
+        save_frame.pack(fill="x", pady=(SPACING["sm"], 0))
+
+        PrimaryButton(
+            save_frame,
+            text="Save Coach Settings",
+            command=self._save_coach_settings,
+            width=160,
+            height=40
+        ).pack(anchor="w")
+
+    def _save_coach_settings(self):
+        """Save coach configuration"""
+        if not self.backend:
+            return
+
+        # Get feed URLs (newline-separated → comma-separated for config)
+        feed_text = self.feed_urls_textbox.get("1.0", "end").strip()
+        feed_urls = ",".join(u.strip() for u in feed_text.split("\n") if u.strip())
+
+        refresh_hours = self.feed_refresh_entry.get().strip() or "4"
+        coach_interval = self.coach_interval_entry.get().strip() or "30"
+
+        if not self.backend.config.has_section('COACH'):
+            self.backend.config.add_section('COACH')
+
+        self.backend.config.set('COACH', 'feed_urls', feed_urls)
+        self.backend.config.set('COACH', 'feed_refresh_hours', refresh_hours)
+        self.backend.config.set('COACH', 'coach_interval', coach_interval)
+
+        # Save config file
+        config_path = getattr(self.backend, 'config_path', 'audio_config.ini')
+        try:
+            with open(config_path, 'w') as f:
+                self.backend.config.write(f)
+            from ui.components.toast import ToastManager
+            ToastManager.success("Coach settings saved!")
+        except Exception as e:
+            from ui.components.toast import ToastManager
+            ToastManager.error(f"Failed to save: {e}")
 
     def _create_about_section(self):
         """Create about section"""
