@@ -46,6 +46,13 @@ LIGHT_THEME = {
 
     "recording_dot": "#dc2626",    # Recording indicator
     "recording_pulse": "#fecaca",  # Recording pulse effect
+
+    "coach_info": "#dbeafe",       # Blue tint for info alerts
+    "coach_info_border": "#3b82f6",
+    "coach_warning": "#fef3c7",    # Amber tint for warning alerts
+    "coach_warning_border": "#f59e0b",
+    "coach_critical": "#fef2f2",   # Red tint for critical alerts
+    "coach_critical_border": "#dc2626",
 }
 
 # Dark theme colors (based on original app)
@@ -93,6 +100,13 @@ DARK_THEME = {
 
     "recording_dot": "#D32F2F",
     "recording_pulse": "#5c1a1a",
+
+    "coach_info": "#1e3a5f",       # Dark blue tint for info alerts
+    "coach_info_border": "#4CAF50",
+    "coach_warning": "#4a3800",    # Dark amber tint for warning alerts
+    "coach_warning_border": "#FF9800",
+    "coach_critical": "#5c1a1a",   # Dark red tint for critical alerts
+    "coach_critical_border": "#D32F2F",
 }
 
 # --- TYPOGRAPHY ---

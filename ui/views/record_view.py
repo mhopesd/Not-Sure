@@ -5,24 +5,28 @@ from ui.components.buttons import PrimaryButton, DestructiveButton, OutlineButto
 from ui.components.inputs import StyledEntry, StyledLabel, StyledTextbox
 from ui.components.badges import SpeakerBadge, StatusBadge
 from ui.components.cards import Card
+from ui.components.coach_panel import CoachAlertsPanel
 
 
 class RecordView(ctk.CTkFrame):
     """Recording interface with mic button, title, speakers, and transcript"""
 
-    def __init__(self, parent, on_save_recording=None, on_start_recording=None, on_stop_recording=None):
+    def __init__(self, parent, on_save_recording=None, on_start_recording=None, on_stop_recording=None, on_set_meeting_context=None):
         colors = ThemeManager.get_colors()
         super().__init__(parent, fg_color=colors["bg"], corner_radius=0)
 
         self.on_save_recording = on_save_recording
         self.on_start_recording = on_start_recording
         self.on_stop_recording = on_stop_recording
+        self.on_set_meeting_context = on_set_meeting_context
         self.is_recording = False
         self.timer_seconds = 0
         self.timer_running = False
         self.speakers = []
         self.transcript = ""
         self.mic_error = None
+        self.coach_panel = None
+        self.recording_split = None
 
         self._build_ui()
 
@@ -41,8 +45,9 @@ class RecordView(ctk.CTkFrame):
         self.card.pack(fill="both", expand=True, padx=SPACING["xl"], pady=SPACING["xl"])
 
         # Content area
-        content = ctk.CTkFrame(self.card, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=SPACING["xl"], pady=SPACING["xl"])
+        self.content = ctk.CTkFrame(self.card, fg_color="transparent")
+        self.content.pack(fill="both", expand=True, padx=SPACING["xl"], pady=SPACING["xl"])
+        content = self.content  # Local alias for use in _build_ui
 
         # Header
         StyledLabel(
@@ -134,6 +139,66 @@ class RecordView(ctk.CTkFrame):
         self.speakers_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
         self.speakers_frame.pack(fill="x", pady=(0, SPACING["md"]))
 
+        # --- Meeting Coach Context Section ---
+        self.context_section = ctk.CTkFrame(form_frame, fg_color="transparent")
+        self.context_section.pack(fill="x", pady=(0, SPACING["md"]))
+
+        self.coach_enabled_var = ctk.BooleanVar(value=False)
+        self.coach_toggle = ctk.CTkCheckBox(
+            self.context_section,
+            text="Enable Live Meeting Coach",
+            variable=self.coach_enabled_var,
+            font=FONTS["body_medium"],
+            text_color=colors["text_primary"],
+            fg_color=colors["accent"],
+            hover_color=colors["accent"],
+            command=self._toggle_context_fields
+        )
+        self.coach_toggle.pack(anchor="w")
+
+        # Collapsible context fields (hidden by default)
+        self.context_fields = ctk.CTkFrame(self.context_section, fg_color="transparent")
+
+        StyledLabel(
+            self.context_fields,
+            text="Agenda Items (one per line)",
+            variant="label"
+        ).pack(anchor="w", pady=(SPACING["sm"], SPACING["xs"]))
+
+        self.agenda_textbox = StyledTextbox(
+            self.context_fields,
+            height=80
+        )
+        self.agenda_textbox.pack(fill="x", pady=(0, SPACING["sm"]))
+
+        StyledLabel(
+            self.context_fields,
+            text="Pre-Meeting Notes (optional)",
+            variant="label"
+        ).pack(anchor="w", pady=(0, SPACING["xs"]))
+
+        self.notes_textbox = StyledTextbox(
+            self.context_fields,
+            height=60
+        )
+        self.notes_textbox.pack(fill="x", pady=(0, SPACING["sm"]))
+
+        duration_row = ctk.CTkFrame(self.context_fields, fg_color="transparent")
+        duration_row.pack(fill="x", pady=(0, SPACING["sm"]))
+
+        StyledLabel(
+            duration_row,
+            text="Expected Duration (min)",
+            variant="label"
+        ).pack(side="left")
+
+        self.duration_entry = StyledEntry(
+            duration_row,
+            placeholder="30",
+            width=80
+        )
+        self.duration_entry.pack(side="left", padx=SPACING["sm"])
+
         # Transcript section
         self.transcript_section = ctk.CTkFrame(content, fg_color="transparent")
 
@@ -195,6 +260,13 @@ class RecordView(ctk.CTkFrame):
         self.level_bar.pack(fill="x")
         self.level_bar.set(0)
 
+    def _toggle_context_fields(self):
+        """Show or hide the coach context fields based on checkbox"""
+        if self.coach_enabled_var.get():
+            self.context_fields.pack(fill="x", pady=(SPACING["sm"], 0))
+        else:
+            self.context_fields.pack_forget()
+
     def _toggle_recording(self):
         """Toggle recording state"""
         if not self.is_recording:
@@ -221,8 +293,27 @@ class RecordView(ctk.CTkFrame):
         self.title_entry.configure(state="disabled")
         self.speaker_entry.configure(state="disabled")
 
-        # Show transcript section
-        self.transcript_section.pack(fill="both", expand=True, pady=SPACING["md"])
+        # Show transcript section — with coach panel split if enabled
+        if self.coach_enabled_var.get():
+            # Create a split layout: transcript (60%) | coach panel (40%)
+            self.recording_split = ctk.CTkFrame(self.content, fg_color="transparent")
+            self.recording_split.pack(fill="both", expand=True, pady=SPACING["md"])
+            self.recording_split.grid_columnconfigure(0, weight=3)
+            self.recording_split.grid_columnconfigure(1, weight=2)
+            self.recording_split.grid_rowconfigure(0, weight=1)
+
+            # Re-parent transcript section into left column
+            self.transcript_section.pack_forget()
+            self.transcript_section.grid(
+                in_=self.recording_split, row=0, column=0, sticky="nsew",
+                padx=(0, SPACING["sm"])
+            )
+
+            # Create coach panel in right column
+            self.coach_panel = CoachAlertsPanel(self.recording_split)
+            self.coach_panel.grid(row=0, column=1, sticky="nsew")
+        else:
+            self.transcript_section.pack(fill="both", expand=True, pady=SPACING["md"])
 
         # Start timer
         self.timer_seconds = 0
@@ -239,6 +330,21 @@ class RecordView(ctk.CTkFrame):
 
         # Hide error if visible
         self.error_frame.pack_forget()
+
+        # Send coach context if enabled
+        if self.coach_enabled_var.get() and self.on_set_meeting_context:
+            agenda_text = self.agenda_textbox.get("1.0", "end") if hasattr(self.agenda_textbox, 'get') else ""
+            agenda_lines = [line.strip() for line in agenda_text.split("\n") if line.strip()]
+            notes = self.notes_textbox.get("1.0", "end").strip() if hasattr(self.notes_textbox, 'get') else ""
+            try:
+                duration = int(self.duration_entry.get())
+            except (ValueError, TypeError):
+                duration = None
+            self.on_set_meeting_context(agenda_lines, notes, duration)
+
+        # Disable coach context fields during recording
+        self.coach_toggle.configure(state="disabled")
+        self.context_fields.pack_forget()
 
         # Notify parent to start backend recording
         if self.on_start_recording:
@@ -263,6 +369,19 @@ class RecordView(ctk.CTkFrame):
         # Enable inputs
         self.title_entry.configure(state="normal")
         self.speaker_entry.configure(state="normal")
+        self.coach_toggle.configure(state="normal")
+
+        # Clean up coach split layout if it was used
+        if self.coach_panel:
+            self.coach_panel.grid_forget()
+            self.coach_panel.destroy()
+            self.coach_panel = None
+        if self.recording_split:
+            # Un-grid the transcript section from the split
+            self.transcript_section.grid_forget()
+            self.recording_split.destroy()
+            self.recording_split = None
+            # Transcript section will be re-packed by reset or hidden
 
         # Show save button if there's a transcript
         if self.transcript:
@@ -365,6 +484,24 @@ class RecordView(ctk.CTkFrame):
         self.speaker_entry.delete(0, "end")
         self.speaker_entry.configure(state="normal")
 
+        # Reset coach state
+        self.coach_toggle.configure(state="normal")
+        self.coach_enabled_var.set(False)
+        self.context_fields.pack_forget()
+        self.agenda_textbox.delete("1.0", "end")
+        self.notes_textbox.delete("1.0", "end")
+        self.duration_entry.delete(0, "end")
+
+        # Reset coach panel
+        if self.coach_panel:
+            self.coach_panel.grid_forget()
+            self.coach_panel.destroy()
+            self.coach_panel = None
+        if self.recording_split:
+            self.transcript_section.grid_forget()
+            self.recording_split.destroy()
+            self.recording_split = None
+
         self.timer_label.configure(text="0:00")
         self.recording_indicator.pack_forget()
 
@@ -430,3 +567,8 @@ class RecordView(ctk.CTkFrame):
     def stop_timer(self):
         """External method to stop the timer"""
         self.timer_running = False
+
+    def update_coach_alerts(self, alerts, agenda):
+        """Update the coach alerts panel during recording."""
+        if self.coach_panel:
+            self.coach_panel.update_alerts(alerts, agenda)
