@@ -56,6 +56,17 @@ interface MeetingData {
   tags?: string[];
 }
 
+function parseSpeakingTime(speaking: string): number {
+  if (!speaking) return 0;
+  const parts = speaking.split(":");
+  if (parts.length === 2) {
+    const m = parseInt(parts[0], 10) || 0;
+    const s = parseInt(parts[1], 10) || 0;
+    return m + s / 60;
+  }
+  return parseFloat(speaking) || 0;
+}
+
 function formatDurationStr(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   if (mins < 60) return `${mins} min`;
@@ -146,7 +157,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
 
   const buildMeetingText = () => {
     const lines: string[] = [];
-    lines.push(meeting.title);
+    lines.push(`# ${meeting.title}`);
     lines.push(`Date: ${formatDateLabel(meeting.date)}, ${formatTimeStr(meeting.date)}`);
     lines.push(`Duration: ${formatDurationStr(meeting.duration)}`);
     lines.push("");
@@ -186,7 +197,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
   };
 
   const handleDownload = () => {
-    const markdown = `# ${meeting.title}\n\n${buildMeetingText()}`;
+    const markdown = buildMeetingText();
     const blob = new Blob([markdown], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -363,8 +374,8 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
               </div>
               <div className="space-y-1.5">
                 {participants.filter((p) => p.speaking).map((p) => {
-                  const mins = parseFloat(p.speaking.replace(":", ".")) || 0;
-                  const maxMins = Math.max(...participants.map((pp) => parseFloat(pp.speaking.replace(":", ".")) || 0), 1);
+                  const mins = parseSpeakingTime(p.speaking);
+                  const maxMins = Math.max(...participants.map((pp) => parseSpeakingTime(pp.speaking)), 1);
                   return (
                     <div key={p.name}>
                       <div className="flex items-center justify-between mb-0.5">

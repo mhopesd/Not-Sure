@@ -203,7 +203,7 @@ export function DashboardLayout() {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
-          {activeView === "home" && <HomeView meetings={meetings} onSelectMeeting={handleSelectMeeting} integrations={integrations} />}
+          {activeView === "home" && <HomeView meetings={meetings} onSelectMeeting={handleSelectMeeting} integrations={integrations} onViewAll={() => setActiveView("meetings")} />}
           {activeView === "meetings" && <MeetingsView meetings={meetings} onSelectMeeting={handleSelectMeeting} onRefresh={fetchMeetings} />}
           {activeView === "journal" && <JournalView />}
           {activeView === "settings" && <SettingsView />}
@@ -460,7 +460,7 @@ function UpcomingEventsWidget({ integrations }: { integrations: ReturnType<typeo
 }
 
 /* ─── Home View ─── */
-function HomeView({ meetings, onSelectMeeting, integrations }: { meetings: BackendMeeting[]; onSelectMeeting: (id: string) => void; integrations: ReturnType<typeof useIntegrations> }) {
+function HomeView({ meetings, onSelectMeeting, integrations, onViewAll }: { meetings: BackendMeeting[]; onSelectMeeting: (id: string) => void; integrations: ReturnType<typeof useIntegrations>; onViewAll: () => void }) {
   // Convert backend meetings to preview format for the home view
   const recentPreviews: MeetingPreview[] = meetings.slice(0, 5).map((m) => {
     const firstTag = m.tags?.[0] || "meeting";
@@ -476,7 +476,7 @@ function HomeView({ meetings, onSelectMeeting, integrations }: { meetings: Backe
 
   // Compute stats from real data
   const totalMeetings = meetings.length;
-  const totalDuration = meetings.reduce((sum, m) => sum + (m.duration || 0), 0);
+  const totalDuration = meetings.reduce((sum, m) => sum + (typeof m.duration === 'number' ? m.duration : 0), 0);
   const totalHours = (totalDuration / 3600).toFixed(1);
   const totalActionItems = meetings.reduce((sum, m) => sum + (m.tasks?.length || 0), 0);
   const withSummary = meetings.filter((m) => m.executive_summary).length;
@@ -531,7 +531,7 @@ function HomeView({ meetings, onSelectMeeting, integrations }: { meetings: Backe
             <Clock size={11} className="text-white/25" />
             <span className="text-[10px] text-white/30 uppercase tracking-wider">Recent Meetings</span>
           </div>
-          <span className="text-[9px] text-[#2774AE] cursor-pointer" onClick={() => {}}>View all</span>
+          <span className="text-[9px] text-[#2774AE] cursor-pointer" onClick={onViewAll}>View all</span>
         </div>
         <div className="space-y-1">
           {recentPreviews.length > 0 ? (

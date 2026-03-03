@@ -228,7 +228,9 @@ export function SettingsView() {
         method: "PUT",
         headers: getApiHeaders(),
         body: JSON.stringify({
-          gemini_api_key: aiProvider === "google" ? apiKey : undefined,
+          ...(aiProvider === "google" && { gemini_api_key: apiKey }),
+          ...(aiProvider === "openai" && { openai_api_key: apiKey }),
+          ...(aiProvider === "anthropic" && { anthropic_api_key: apiKey }),
           llm_provider: toBackendProvider(aiProvider),
         }),
       });
