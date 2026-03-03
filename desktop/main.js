@@ -33,8 +33,8 @@ function getProjectRoot() {
     if (fs.existsSync(configPath)) {
         return fs.readFileSync(configPath, 'utf-8').trim();
     }
-    // Fallback: hardcoded project path (set at build time)
-    return '/Users/micha/audio-summary-app';
+    // Fallback: use app path parent
+    return path.resolve(path.dirname(app.getPath('exe')), '..', '..', '..');
 }
 
 /**
@@ -177,8 +177,8 @@ function createWindow() {
         mainWindow.loadURL('http://localhost:5173');
         mainWindow.webContents.openDevTools({ mode: 'detach' });
     } else {
-        // Production: load the built frontend from figma-ui
-        const frontendPath = path.join(__dirname, '..', 'figma-ui', 'dist', 'index.html');
+        // Production: load the built frontend (copied by build_app.sh to desktop/frontend/)
+        const frontendPath = path.join(__dirname, 'frontend', 'index.html');
         mainWindow.loadFile(frontendPath);
     }
 

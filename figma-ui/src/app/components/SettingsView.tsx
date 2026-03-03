@@ -134,6 +134,37 @@ export function SettingsView() {
   const [actionDue, setActionDue] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
 
+  // Load permissions status from backend
+  useEffect(() => {
+    async function loadPermissions() {
+      try {
+        const res = await fetch(getApiUrl("/api/permissions/status"), { headers: getApiHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.microphone !== undefined) setMicEnabled(data.microphone);
+          if (data.screen_recording !== undefined) setScreenEnabled(data.screen_recording);
+          if (data.system_audio !== undefined) setSysAudioEnabled(data.system_audio);
+        }
+      } catch (err) {
+        console.error("Failed to load permissions:", err);
+      }
+    }
+    loadPermissions();
+  }, []);
+
+  // Open system preferences for a permission
+  const openPermission = async (permission: string) => {
+    try {
+      await fetch(getApiUrl("/api/permissions/open"), {
+        method: "POST",
+        headers: getApiHeaders(),
+        body: JSON.stringify({ permission }),
+      });
+    } catch (err) {
+      console.error(`Failed to open permission ${permission}:`, err);
+    }
+  };
+
   // Load settings from backend
   useEffect(() => {
     async function loadSettings() {
@@ -149,6 +180,11 @@ export function SettingsView() {
           if (data.ollama_model) {
             setOllamaModel(data.ollama_model);
           }
+          // General settings
+          if (data.launch_on_startup !== undefined) setLaunchOnStartup(data.launch_on_startup);
+          if (data.show_in_menubar !== undefined) setMenuBarIcon(data.show_in_menubar);
+          if (data.dark_mode !== undefined) setDarkMode(data.dark_mode);
+          if (data.language !== undefined) setLanguage(data.language);
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
@@ -160,6 +196,24 @@ export function SettingsView() {
   // Map frontend provider id → backend llm name
   const toBackendProvider = (p: string) =>
     p === "google" ? "gemini" : p === "local" ? "ollama" : p;
+
+  // Persist a single general setting to the backend
+  const saveGeneralSetting = async (field: string, value: any) => {
+    try {
+      await fetch(getApiUrl("/api/settings"), {
+        method: "PUT",
+        headers: getApiHeaders(),
+        body: JSON.stringify({ [field]: value }),
+      });
+    } catch (err) {
+      console.error(`Failed to save ${field}:`, err);
+    }
+  };
+
+  const toggleLaunchOnStartup = () => { const v = !launchOnStartup; setLaunchOnStartup(v); saveGeneralSetting("launch_on_startup", v); };
+  const toggleMenuBarIcon = () => { const v = !menuBarIcon; setMenuBarIcon(v); saveGeneralSetting("show_in_menubar", v); };
+  const toggleDarkMode = () => { const v = !darkMode; setDarkMode(v); saveGeneralSetting("dark_mode", v); };
+  const handleLanguageChange = (lang: string) => { setLanguage(lang); saveGeneralSetting("language", lang); };
 
   const handleSaveApiKey = async () => {
     if (!apiKey.trim()) {
@@ -258,10 +312,10 @@ export function SettingsView() {
         <div className="max-w-lg">
           {activeSection === "general" && (
             <GeneralSection
-              launchOnStartup={launchOnStartup} setLaunchOnStartup={setLaunchOnStartup}
-              menuBarIcon={menuBarIcon} setMenuBarIcon={setMenuBarIcon}
-              darkMode={darkMode} setDarkMode={setDarkMode}
-              language={language} setLanguage={setLanguage}
+              launchOnStartup={launchOnStartup} setLaunchOnStartup={toggleLaunchOnStartup}
+              menuBarIcon={menuBarIcon} setMenuBarIcon={toggleMenuBarIcon}
+              darkMode={darkMode} setDarkMode={toggleDarkMode}
+              language={language} setLanguage={handleLanguageChange}
             />
           )}
           {activeSection === "permissions" && (
@@ -269,6 +323,7 @@ export function SettingsView() {
               mic={micEnabled} setMic={setMicEnabled}
               sysAudio={sysAudioEnabled} setSysAudio={setSysAudioEnabled}
               screen={screenEnabled} setScreen={setScreenEnabled}
+              openPermission={openPermission}
             />
           )}
           {activeSection === "ai" && (
@@ -312,11 +367,11 @@ function GeneralSection({ launchOnStartup, setLaunchOnStartup, menuBarIcon, setM
     <div className="space-y-4">
       <SectionHeader icon={<Settings size={14} />} title="General" desc="App behavior and appearance" color="rgba(255,255,255,0.15)" />
       <div className="space-y-1.5">
-        <SettingRow icon={<RotateCcw size={13} className="text-white/40" />} iconBg="rgba(255,255,255,0.04)" title="Launch on startup" desc="Start NotSure when your Mac boots" right={<Toggle enabled={launchOnStartup} onToggle={() => setLaunchOnStartup(!launchOnStartup)} />} />
-        <SettingRow icon={<Monitor size={13} className="text-white/40" />} iconBg="rgba(255,255,255,0.04)" title="Show in menu bar" desc="Display NotSure icon in the menu bar" right={<Toggle enabled={menuBarIcon} onToggle={() => setMenuBarIcon(!menuBarIcon)} />} />
-        <SettingRow icon={<Palette size={13} className="text-white/40" />} iconBg="rgba(255,255,255,0.04)" title="Dark mode" desc="Use dark theme (recommended)" right={<Toggle enabled={darkMode} onToggle={() => setDarkMode(!darkMode)} />} />
+        <SettingRow icon={<RotateCcw size={13} className="text-white/40" />} iconBg="rgba(255,255,255,0.04)" title="Launch on startup" desc="Start NotSure when your Mac boots" right={<Toggle enabled={launchOnStartup} onToggle={setLaunchOnStartup} />} />
+        <SettingRow icon={<Monitor size={13} className="text-white/40" />} iconBg="rgba(255,255,255,0.04)" title="Show in menu bar" desc="Display NotSure icon in the menu bar" right={<Toggle enabled={menuBarIcon} onToggle={setMenuBarIcon} />} />
+        <SettingRow icon={<Palette size={13} className="text-white/40" />} iconBg="rgba(255,255,255,0.04)" title="Dark mode" desc="Use dark theme (recommended)" right={<Toggle enabled={darkMode} onToggle={setDarkMode} />} />
         <SettingRow icon={<Globe size={13} className="text-white/40" />} iconBg="rgba(255,255,255,0.04)" title="Language" desc="Interface and transcription language" right={
-          <select value={language} onChange={(e) => setLanguage(e.target.value)} className="text-[10px] text-white/50 bg-white/[0.04] border border-white/[0.06] rounded px-2 py-1 outline-none">
+          <select value={language} onChange={(e) => setLanguage(e.target.value as string)} className="text-[10px] text-white/50 bg-white/[0.04] border border-white/[0.06] rounded px-2 py-1 outline-none">
             <option value="en">English</option>
             <option value="es">Spanish</option>
             <option value="fr">French</option>
@@ -330,16 +385,24 @@ function GeneralSection({ launchOnStartup, setLaunchOnStartup, menuBarIcon, setM
 }
 
 /* ═══ Permissions ═══ */
-function PermissionsSection({ mic, setMic, sysAudio, setSysAudio, screen, setScreen }: any) {
+function PermissionsSection({ mic, setMic, sysAudio, setSysAudio, screen, setScreen, openPermission }: any) {
   return (
     <div className="space-y-4">
       <SectionHeader icon={<Shield size={14} />} title="Permissions" desc="System access for recording" color="rgba(39,116,174,0.15)" />
       <div className="space-y-1.5">
-        <SettingRow icon={<Mic size={13} className={mic ? "text-[#6dd58c]" : "text-white/30"} />} iconBg={mic ? "rgba(109,213,140,0.1)" : "rgba(255,255,255,0.04)"} title="Microphone" desc="Capture your voice during meetings" right={<span className="flex items-center gap-1 text-[10px]" style={{ color: mic ? "#6dd58c" : "rgba(255,255,255,0.25)" }}>{mic ? <><Check size={10} /> Granted</> : "Denied"}</span>} />
+        <SettingRow icon={<Mic size={13} className={mic ? "text-[#6dd58c]" : "text-white/30"} />} iconBg={mic ? "rgba(109,213,140,0.1)" : "rgba(255,255,255,0.04)"} title="Microphone" desc="Capture your voice during meetings" right={
+          <button onClick={() => openPermission("microphone")} className="flex items-center gap-1 text-[10px] hover:opacity-80 transition-opacity" style={{ color: mic ? "#6dd58c" : "rgba(255,255,255,0.25)" }}>
+            {mic ? <><Check size={10} /> Granted</> : <>Denied <ExternalLink size={8} /></>}
+          </button>
+        } />
         <SettingRow icon={<Monitor size={13} className={sysAudio ? "text-[#6dd58c]" : "text-white/30"} />} iconBg={sysAudio ? "rgba(109,213,140,0.1)" : "rgba(255,255,255,0.04)"} title="System Audio" desc="Capture audio from other participants" right={<span className="flex items-center gap-1 text-[10px]" style={{ color: sysAudio ? "#6dd58c" : "rgba(255,255,255,0.25)" }}>{sysAudio ? <><Check size={10} /> Granted</> : "Denied"}</span>} />
-        <SettingRow icon={<Monitor size={13} className={screen ? "text-[#6dd58c]" : "text-white/30"} />} iconBg={screen ? "rgba(109,213,140,0.1)" : "rgba(255,255,255,0.04)"} title="Screen Recording" desc="Optional — capture shared screens" right={<Toggle enabled={screen} onToggle={() => setScreen(!screen)} />} />
+        <SettingRow icon={<Monitor size={13} className={screen ? "text-[#6dd58c]" : "text-white/30"} />} iconBg={screen ? "rgba(109,213,140,0.1)" : "rgba(255,255,255,0.04)"} title="Screen Recording" desc="Optional — capture shared screens" right={
+          <button onClick={() => openPermission("screen_recording")} className="flex items-center gap-1 text-[10px] hover:opacity-80 transition-opacity" style={{ color: screen ? "#6dd58c" : "rgba(255,255,255,0.25)" }}>
+            {screen ? <><Check size={10} /> Granted</> : <>Enable <ExternalLink size={8} /></>}
+          </button>
+        } />
       </div>
-      <p className="text-[9px] text-white/15 flex items-center gap-1"><Shield size={8} /> Open System Preferences to manage permissions</p>
+      <p className="text-[9px] text-white/15 flex items-center gap-1"><Shield size={8} /> Click a permission to open System Preferences</p>
     </div>
   );
 }
@@ -657,17 +720,57 @@ function NotificationsSection({ meetingReminders, setMeetingReminders, transcrip
 }
 
 /* ═══ Storage ═══ */
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
 function StorageSection() {
+  const [storageData, setStorageData] = useState<{
+    recordings_bytes: number;
+    transcripts_bytes: number;
+    summaries_bytes: number;
+    total_bytes: number;
+    storage_path: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadStorage() {
+      try {
+        const res = await fetch(getApiUrl("/api/storage/usage"), { headers: getApiHeaders() });
+        if (res.ok) {
+          setStorageData(await res.json());
+        }
+      } catch (err) {
+        console.error("Failed to load storage usage:", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadStorage();
+  }, []);
+
+  const total = storageData?.total_bytes || 0;
+  const recordings = storageData?.recordings_bytes || 0;
+  const transcripts = storageData?.transcripts_bytes || 0;
+  const summaries = storageData?.summaries_bytes || 0;
+  const storagePath = storageData?.storage_path || "~/Documents/Audio Recordings";
+
+  const pctOf = (v: number) => (total > 0 ? Math.max((v / total) * 100, 0.5) : 0);
+
   const storageItems = [
-    { label: "Recordings", size: "—", color: "#2774AE", pct: 0 },
-    { label: "Transcripts", size: "—", color: "#FFD100", pct: 0 },
-    { label: "Summaries", size: "—", color: "#6dd58c", pct: 0 },
-    { label: "Cache", size: "—", color: "#8b5cf6", pct: 0 },
+    { label: "Recordings", size: formatBytes(recordings), color: "#2774AE", pct: pctOf(recordings) },
+    { label: "Transcripts", size: formatBytes(transcripts), color: "#FFD100", pct: pctOf(transcripts) },
+    { label: "Summaries", size: formatBytes(summaries), color: "#6dd58c", pct: pctOf(summaries) },
   ];
 
   return (
     <div className="space-y-4">
-      <SectionHeader icon={<HardDrive size={14} />} title="Storage" desc="Local storage usage" color="rgba(139,92,246,0.12)" />
+      <SectionHeader icon={<HardDrive size={14} />} title="Storage" desc={loading ? "Loading..." : `${formatBytes(total)} used`} color="rgba(139,92,246,0.12)" />
       <div>
         <div className="h-2 rounded-full bg-white/[0.04] overflow-hidden flex">
           {storageItems.map((item) => (
@@ -678,14 +781,14 @@ function StorageSection() {
           {storageItems.map((item) => (
             <div key={item.label} className="flex items-center gap-1">
               <div className="w-1.5 h-1.5 rounded-full" style={{ background: item.color }} />
-              <span className="text-[9px] text-white/25">{item.label}</span>
+              <span className="text-[9px] text-white/25">{item.label} — {item.size}</span>
             </div>
           ))}
         </div>
       </div>
       <div className="space-y-1.5">
         <SettingRow icon={<Trash2 size={13} className="text-white/30" />} iconBg="rgba(255,255,255,0.04)" title="Clear cache" desc="Remove temporary files" right={<button className="text-[10px] text-white/30 hover:text-white/50 px-2 py-1 rounded-md transition-colors" style={{ background: "rgba(255,255,255,0.03)" }}>Clear</button>} />
-        <SettingRow icon={<HardDrive size={13} className="text-white/30" />} iconBg="rgba(255,255,255,0.04)" title="Storage location" desc="~/Documents/Audio Recordings" right={<button className="text-[10px] text-white/30 hover:text-white/50 px-2 py-1 rounded-md transition-colors" style={{ background: "rgba(255,255,255,0.03)" }}>Change</button>} />
+        <SettingRow icon={<HardDrive size={13} className="text-white/30" />} iconBg="rgba(255,255,255,0.04)" title="Storage location" desc={storagePath} right={<button className="text-[10px] text-white/30 hover:text-white/50 px-2 py-1 rounded-md transition-colors" style={{ background: "rgba(255,255,255,0.03)" }}>Change</button>} />
       </div>
     </div>
   );

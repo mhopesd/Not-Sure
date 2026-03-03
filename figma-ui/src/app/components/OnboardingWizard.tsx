@@ -1,6 +1,7 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useIntegrations } from "../hooks/useIntegrations";
+import { getApiUrl, getApiHeaders } from "../config/api";
 // NotSure logo placeholder (Figma asset removed for standalone builds)
 const imgCanvas = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#1a1a2e"/><text x="32" y="40" text-anchor="middle" font-size="28" fill="#FFD100" font-family="sans-serif">?</text></svg>');
 import {
@@ -158,6 +159,19 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
 
+  // Fetch actual permission status on mount
+  useEffect(() => {
+    fetch(getApiUrl("/api/permissions/status"), { headers: getApiHeaders() })
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => {
+        if (d) {
+          setMicGranted(d.microphone);
+          setSysAudioGranted(d.system_audio);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Integrations (wired to backend OAuth)
   const oauthIntegrations = useIntegrations();
   const googleConnected = oauthIntegrations.status?.google?.connected ?? false;
@@ -172,7 +186,21 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     return true;
   }, [step, micGranted, sysAudioGranted, aiProvider, apiKey]);
 
-  const next = () => {
+  const next = async () => {
+    // Save API key when leaving the AI setup step
+    if (step === 2 && apiKey && aiProvider !== "local") {
+      try {
+        const body: Record<string, string> = { llm_provider: aiProvider };
+        if (aiProvider === "openai") body.openai_api_key = apiKey;
+        else if (aiProvider === "anthropic") body.anthropic_api_key = apiKey;
+        else body.gemini_api_key = apiKey;
+        await fetch(getApiUrl("/api/settings"), {
+          method: "PUT",
+          headers: getApiHeaders(),
+          body: JSON.stringify(body),
+        });
+      } catch { /* non-critical */ }
+    }
     if (step < TOTAL_STEPS - 1) setStep(step + 1);
     else onComplete();
   };
@@ -305,9 +333,39 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                   micGranted={micGranted}
                   sysAudioGranted={sysAudioGranted}
                   screenGranted={screenGranted}
-                  onMic={() => setMicGranted(true)}
-                  onSysAudio={() => setSysAudioGranted(true)}
-                  onScreen={() => setScreenGranted(true)}
+                  onMic={async () => {
+                    try {
+                      await fetch(getApiUrl("/api/permissions/open"), {
+                        method: "POST", headers: getApiHeaders(),
+                        body: JSON.stringify({ permission: "microphone" }),
+                      });
+                      setTimeout(async () => {
+                        const res = await fetch(getApiUrl("/api/permissions/status"), { headers: getApiHeaders() });
+                        if (res.ok) { const d = await res.json(); setMicGranted(d.microphone); }
+                      }, 3000);
+                    } catch { /* ignore */ }
+                  }}
+                  onSysAudio={async () => {
+                    try {
+                      await fetch(getApiUrl("/api/permissions/open"), {
+                        method: "POST", headers: getApiHeaders(),
+                        body: JSON.stringify({ permission: "screen_recording" }),
+                      });
+                      setTimeout(async () => {
+                        const res = await fetch(getApiUrl("/api/permissions/status"), { headers: getApiHeaders() });
+                        if (res.ok) { const d = await res.json(); setSysAudioGranted(d.system_audio); }
+                      }, 3000);
+                    } catch { /* ignore */ }
+                  }}
+                  onScreen={async () => {
+                    try {
+                      await fetch(getApiUrl("/api/permissions/open"), {
+                        method: "POST", headers: getApiHeaders(),
+                        body: JSON.stringify({ permission: "screen_recording" }),
+                      });
+                      setTimeout(() => setScreenGranted(true), 3000);
+                    } catch { /* ignore */ }
+                  }}
                 />
               )}
               {step === 2 && (

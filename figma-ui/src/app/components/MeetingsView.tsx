@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Search,
   FileText,
@@ -105,6 +105,9 @@ export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsV
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<any[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
+  const [filterMode, setFilterMode] = useState<"all" | "has_summary" | "has_transcript">("all");
+  const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
+  const filterRef = useRef<HTMLDivElement>(null);
 
   const allMeetings = useMemo(() => meetings.map(backendToMeetingFull), [meetings]);
 
@@ -136,10 +139,25 @@ export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsV
     return () => clearTimeout(timer);
   }, [search]);
 
+  // Close filter dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (filterRef.current && !filterRef.current.contains(e.target as Node)) {
+        setFilterDropdownOpen(false);
+      }
+    }
+    if (filterDropdownOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [filterDropdownOpen]);
+
   const filtered = allMeetings.filter((m) => {
     if (activeTab === "flagged" && !m.flagged) return false;
     if (activeTab === "week" && !["Today", "Yesterday"].includes(m.date)) return false;
     if (search && searchResults === null && !m.title.toLowerCase().includes(search.toLowerCase())) return false;
+    if (filterMode === "has_summary" && !m.hasSummary) return false;
+    if (filterMode === "has_transcript" && !m.hasTranscript) return false;
     return true;
   });
 
@@ -156,6 +174,32 @@ export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsV
         return found || backendToMeetingFull({ id: r.meeting_id, title: r.title, date: r.date, speakers: [], transcript: "", nextSteps: "", duration: 0 });
       })
     : filtered;
+
+  function handleExport() {
+    const header = ["Title", "Date", "Duration", "Speakers", "Executive Summary"];
+    const rows = displayMeetings.map((m) => {
+      const raw = meetings.find((bm) => bm.id === m.id);
+      const speakers = raw?.speakers?.join("; ") || "";
+      const summary = (raw?.executive_summary || "").replace(/"/g, '""');
+      return [
+        `"${m.title.replace(/"/g, '""')}"`,
+        `"${m.date} ${m.time}"`,
+        `"${m.duration}"`,
+        `"${speakers}"`,
+        `"${summary}"`,
+      ].join(",");
+    });
+    const csv = [header.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `meetings-export-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 
   // Group by date
   const grouped: Record<string, MeetingFull[]> = {};
@@ -185,14 +229,43 @@ export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsV
             <div className="absolute right-3 top-1/2 -translate-y-1/2 w-3 h-3 border border-white/30 border-t-transparent rounded-full animate-spin" />
           )}
         </div>
+        <div ref={filterRef} className="relative">
+          <button
+            onClick={() => setFilterDropdownOpen((v) => !v)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[11px] transition-colors"
+            style={{
+              background: filterMode !== "all" ? "rgba(39,116,174,0.12)" : "rgba(255,255,255,0.03)",
+              border: filterMode !== "all" ? "1px solid rgba(39,116,174,0.25)" : "1px solid rgba(255,255,255,0.05)",
+              color: filterMode !== "all" ? "#2774AE" : "rgba(255,255,255,0.35)",
+            }}
+          >
+            <Filter size={11} />
+            {filterMode === "all" ? "Filter" : filterMode === "has_summary" ? "Has Summary" : "Has Transcript"}
+          </button>
+          {filterDropdownOpen && (
+            <div
+              className="absolute top-full left-0 mt-1 w-44 rounded-lg py-1 z-50"
+              style={{ background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.08)", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}
+            >
+              {([
+                { key: "all" as const, label: "All Meetings" },
+                { key: "has_summary" as const, label: "Has Summary" },
+                { key: "has_transcript" as const, label: "Has Transcript" },
+              ]).map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => { setFilterMode(opt.key); setFilterDropdownOpen(false); }}
+                  className="w-full text-left px-3 py-1.5 text-[11px] hover:bg-white/[0.05] transition-colors"
+                  style={{ color: filterMode === opt.key ? "#2774AE" : "rgba(255,255,255,0.5)" }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
-          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[11px] text-white/35 hover:text-white/50 transition-colors"
-          style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}
-        >
-          <Filter size={11} />
-          Filter
-        </button>
-        <button
+          onClick={handleExport}
           className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[11px] text-white/35 hover:text-white/50 transition-colors"
           style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}
         >

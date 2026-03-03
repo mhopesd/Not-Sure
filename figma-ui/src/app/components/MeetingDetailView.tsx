@@ -87,6 +87,7 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
   const [loading, setLoading] = useState(true);
   const [actionStates, setActionStates] = useState<Record<string, boolean>>({});
   const [expandedTranscript, setExpandedTranscript] = useState(true);
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     async function fetchMeeting() {
@@ -136,6 +137,75 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
 
   const toggleAction = (id: string) => {
     setActionStates((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const showFeedback = (msg: string) => {
+    setCopyFeedback(msg);
+    setTimeout(() => setCopyFeedback(null), 2000);
+  };
+
+  const buildMeetingText = () => {
+    const lines: string[] = [];
+    lines.push(meeting.title);
+    lines.push(`Date: ${formatDateLabel(meeting.date)}, ${formatTimeStr(meeting.date)}`);
+    lines.push(`Duration: ${formatDurationStr(meeting.duration)}`);
+    lines.push("");
+    if (meeting.executive_summary) {
+      lines.push("## Summary");
+      lines.push(meeting.executive_summary);
+      lines.push("");
+    }
+    if (meeting.highlights && meeting.highlights.length > 0) {
+      lines.push("## Highlights");
+      meeting.highlights.forEach((h) => lines.push(`- ${h}`));
+      lines.push("");
+    }
+    if (meeting.tasks && meeting.tasks.length > 0) {
+      lines.push("## Action Items");
+      meeting.tasks.forEach((t) => {
+        const done = t.done ? "[x]" : "[ ]";
+        const assignee = t.assignee ? ` (${t.assignee})` : "";
+        lines.push(`- ${done} ${t.text}${assignee}`);
+      });
+      lines.push("");
+    }
+    if (meeting.transcript) {
+      lines.push("## Transcript");
+      lines.push(meeting.transcript);
+    }
+    return lines.join("\n");
+  };
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(buildMeetingText());
+      showFeedback("Copied!");
+    } catch {
+      showFeedback("Copy failed");
+    }
+  };
+
+  const handleDownload = () => {
+    const markdown = `# ${meeting.title}\n\n${buildMeetingText()}`;
+    const blob = new Blob([markdown], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${meeting.title.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "-")}-meeting.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleShare = async () => {
+    const link = `${window.location.origin}/meeting/${meeting.id}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      showFeedback("Link copied!");
+    } catch {
+      showFeedback("Copy failed");
+    }
   };
 
   // Build transcript segments from diarized or plain transcript
@@ -213,9 +283,12 @@ export function MeetingDetailView({ meetingId, onBack }: MeetingDetailViewProps)
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              <button className="p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"><Copy size={12} className="text-white/25" /></button>
-              <button className="p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"><Share2 size={12} className="text-white/25" /></button>
-              <button className="p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"><Download size={12} className="text-white/25" /></button>
+              {copyFeedback && (
+                <span className="text-[9px] text-[#6dd58c] mr-1 animate-pulse">{copyFeedback}</span>
+              )}
+              <button onClick={handleCopy} title="Copy meeting notes" className="p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"><Copy size={12} className="text-white/25" /></button>
+              <button onClick={handleShare} title="Copy link" className="p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"><Share2 size={12} className="text-white/25" /></button>
+              <button onClick={handleDownload} title="Download as Markdown" className="p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"><Download size={12} className="text-white/25" /></button>
               <button className="p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"><MoreHorizontal size={12} className="text-white/25" /></button>
             </div>
           </div>
