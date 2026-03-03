@@ -6,7 +6,7 @@
     "scripts": {
         "start": "electron .",
         "build": "electron-builder --mac",
-        "build-frontend": "cd ../Personalassistantappmainpage-main && npm run build"
+        "build-frontend": "cd ../figma-ui && npm run build"
     },
     "author": "Micha",
     "license": "MIT",

@@ -127,56 +127,79 @@ export function RecordingView({ onStop }: RecordingViewProps) {
   }, []);
 
   const connectWebSocket = useCallback(() => {
-    try {
-      const ws = new WebSocket(getWebSocketUrl());
+    let reconnectAttempts = 0;
+    const MAX_RECONNECTS = 10;
+    const RECONNECT_DELAY = 2000;
 
-      ws.onopen = () => console.log("WebSocket connected");
+    function connect() {
+      try {
+        const ws = new WebSocket(getWebSocketUrl());
 
-      ws.onmessage = (event) => {
-        try {
-          const message = JSON.parse(event.data);
-          switch (message.type) {
-            case "transcript_update":
-              if (message.text) {
-                const speaker = message.speaker || "Speaker";
-                setSegments((prev) => [
-                  ...prev,
-                  {
-                    speaker,
-                    text: message.text,
-                    color: getSpeakerColor(speaker),
-                    identified: speaker !== "Speaker" && !speaker.startsWith("Speaker "),
-                    timestamp: formatTime(elapsedRef.current),
-                  },
-                ]);
-              }
-              break;
-            case "audio_level":
-              setAudioLevel(message.value || 0);
-              break;
-            case "live_summary":
-              if (message.data) setLiveInsights(message.data);
-              break;
-            case "status":
-              if (message.status === "processing") setStatus("processing");
-              else if (message.status === "complete") {
-                setStatus("idle");
-                onStopRef.current();
-              }
-              break;
+        ws.onopen = () => {
+          console.log("WebSocket connected");
+          reconnectAttempts = 0;
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            switch (message.type) {
+              case "transcript_update":
+                if (message.text) {
+                  const speaker = message.speaker || "Speaker";
+                  setSegments((prev) => [
+                    ...prev,
+                    {
+                      speaker,
+                      text: message.text,
+                      color: getSpeakerColor(speaker),
+                      identified: speaker !== "Speaker" && !speaker.startsWith("Speaker "),
+                      timestamp: formatTime(elapsedRef.current),
+                    },
+                  ]);
+                }
+                break;
+              case "audio_level":
+                setAudioLevel(message.value || 0);
+                break;
+              case "live_summary":
+                if (message.data) setLiveInsights(message.data);
+                break;
+              case "status":
+                if (message.status === "processing") setStatus("processing");
+                else if (message.status === "complete") {
+                  setStatus("idle");
+                  onStopRef.current();
+                }
+                break;
+            }
+          } catch (err) {
+            console.error("WS parse error:", err);
           }
-        } catch (err) {
-          console.error("WS parse error:", err);
+        };
+
+        ws.onerror = (error) => console.error("WebSocket error:", error);
+
+        ws.onclose = (event) => {
+          console.log("WebSocket disconnected");
+          if (!event.wasClean && reconnectAttempts < MAX_RECONNECTS) {
+            reconnectAttempts++;
+            console.log(`WebSocket reconnecting (attempt ${reconnectAttempts})...`);
+            setTimeout(connect, RECONNECT_DELAY * reconnectAttempts);
+          }
+        };
+
+        wsRef.current = ws;
+      } catch (err) {
+        console.error("Failed to connect WebSocket:", err);
+        if (reconnectAttempts < MAX_RECONNECTS) {
+          reconnectAttempts++;
+          setTimeout(connect, RECONNECT_DELAY * reconnectAttempts);
         }
-      };
-
-      ws.onerror = (error) => console.error("WebSocket error:", error);
-      ws.onclose = () => console.log("WebSocket disconnected");
-
-      wsRef.current = ws;
-    } catch (err) {
-      console.error("Failed to connect WebSocket:", err);
+      }
     }
+
+    connect();
   }, []);
 
   const startRecording = async () => {
@@ -517,7 +540,13 @@ export function RecordingView({ onStop }: RecordingViewProps) {
             </button>
 
             <button
-              onClick={() => setStatus(status === "recording" ? "paused" : "recording")}
+              onClick={async () => {
+                try {
+                  const endpoint = status === "recording" ? "/api/recordings/pause" : "/api/recordings/resume";
+                  const res = await fetch(getApiUrl(endpoint), { method: "POST", headers: getApiHeaders() });
+                  if (res.ok) setStatus(status === "recording" ? "paused" : "recording");
+                } catch { /* ignore */ }
+              }}
               className="w-10 h-10 rounded-xl flex items-center justify-center transition-all"
               style={{
                 background: status === "recording" ? "rgba(255,209,0,0.12)" : "rgba(39,116,174,0.15)",

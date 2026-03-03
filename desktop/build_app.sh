@@ -7,7 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DESKTOP_DIR="$SCRIPT_DIR"
-FRONTEND_DIR="$PROJECT_ROOT/Personalassistantappmainpage-main"
+FRONTEND_DIR="$PROJECT_ROOT/figma-ui"
 
 echo "🏗️  Building NotSure.app"
 echo "   Project root: $PROJECT_ROOT"

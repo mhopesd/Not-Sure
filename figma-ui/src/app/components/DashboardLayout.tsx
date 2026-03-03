@@ -19,6 +19,7 @@ import {
   Plug,
 } from "lucide-react";
 import { useIntegrations } from "../hooks/useIntegrations";
+import { useAuth } from "../hooks/useAuth";
 import { MeetingsView } from "./MeetingsView";
 import { MeetingDetailView } from "./MeetingDetailView";
 import { JournalView } from "./JournalView";
@@ -306,17 +307,41 @@ function Sidebar({
         })}
       </nav>
 
-      {/* Sidebar Footer */}
-      <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
-        <div className="flex items-center gap-2 px-1.5">
-          <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#2774AE] to-[#1a5a8e] flex items-center justify-center">
-            <span className="text-[8px] text-white">MH</span>
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-[10px] text-white/50 truncate">mhopesd</div>
-          </div>
-          <div className="w-1.5 h-1.5 rounded-full bg-[#6dd58c]" title="Online" />
+      {/* Sidebar Footer — wired to auth */}
+      <SidebarFooter />
+    </div>
+  );
+}
+
+function SidebarFooter() {
+  const auth = useAuth();
+  const initials = auth.email
+    ? auth.email
+        .split("@")[0]
+        .split(".")
+        .map((p) => p[0]?.toUpperCase() || "")
+        .join("")
+        .slice(0, 2)
+    : "?";
+  const displayName = auth.email ? auth.email.split("@")[0] : "Not signed in";
+
+  return (
+    <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+      <div className="flex items-center gap-2 px-1.5 group relative">
+        <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#2774AE] to-[#1a5a8e] flex items-center justify-center">
+          <span className="text-[8px] text-white">{initials}</span>
         </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[10px] text-white/50 truncate">{displayName}</div>
+        </div>
+        <button
+          onClick={() => auth.logout().then(() => window.location.href = "/login")}
+          className="text-[9px] text-white/20 hover:text-red-400/60 transition-colors opacity-0 group-hover:opacity-100"
+          title="Sign out"
+        >
+          Sign out
+        </button>
+        <div className="w-1.5 h-1.5 rounded-full bg-[#6dd58c]" title="Online" />
       </div>
     </div>
   );

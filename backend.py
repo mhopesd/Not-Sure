@@ -53,6 +53,7 @@ class AudioCaptureError(Exception): pass
 class EnhancedAudioApp:
     def __init__(self, status_callback=None, result_callback=None, transcript_callback=None, level_callback=None):
         self.is_recording = False
+        self.is_paused = False
         self._processing_audio = False  # Guard against multiple stop_recording calls
         self.recording_thread = None
         self.transcription_thread = None
@@ -368,6 +369,18 @@ class EnhancedAudioApp:
         self.update_status("Processing final audio...")
         threading.Thread(target=self._async_stop_and_process).start()
 
+    def pause_recording(self):
+        """Pause the recording (stops writing audio frames)."""
+        self.is_paused = True
+        self.update_status("⏸ Recording paused")
+        logger.info("Recording paused.")
+
+    def resume_recording(self):
+        """Resume a paused recording."""
+        self.is_paused = False
+        self.update_status("● Recording...")
+        logger.info("Recording resumed.")
+
     def _async_stop_and_process(self):
         try:
             logger.info("Waiting for threads to finish...")
@@ -434,9 +447,10 @@ class EnhancedAudioApp:
                     while self.is_recording:
                         try:
                             # Non-blocking check for stop
-                            data = q.get(timeout=1.0) 
-                            wf.writeframes(data)
-                            success = True
+                            data = q.get(timeout=1.0)
+                            if not self.is_paused:
+                                wf.writeframes(data)
+                                success = True
                         except queue.Empty:
                             # Keep loop alive if just quiet, or check if recording stopped
                             pass

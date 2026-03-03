@@ -5,9 +5,9 @@ This server exposes the Python backend (audio recording, transcription, summariz
 as REST and WebSocket endpoints for the React frontend.
 """
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import asyncio
@@ -41,7 +41,7 @@ app = FastAPI(
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:3000", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,8 +98,20 @@ class Person(BaseModel):
 
 class SettingsUpdate(BaseModel):
     gemini_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
     ollama_model: Optional[str] = None
     llm_provider: Optional[str] = None
+    launch_on_startup: Optional[bool] = None
+    show_in_menubar: Optional[bool] = None
+    dark_mode: Optional[bool] = None
+    language: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    provider: str  # "google" or "microsoft"
+
+class PermissionRequest(BaseModel):
+    permission: str  # "microphone", "screen_recording", etc.
 
 # Status callback for WebSocket updates
 async def broadcast_status(message: str):
@@ -173,6 +185,115 @@ async def health_check():
         "status": "healthy",
         "backend_ready": backend_app is not None,
         "model_loaded": backend_app.whisper_model is not None if backend_app else False
+    }
+
+# ==================== AUTH MIDDLEWARE ====================
+
+# Routes that don't require authentication
+AUTH_EXEMPT_ROUTES = {
+    "/", "/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/logout",
+    "/api/integrations/google/auth", "/api/integrations/google/callback",
+    "/api/integrations/microsoft/auth", "/api/integrations/microsoft/callback",
+    "/ws",
+}
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Require login for all API routes except auth and health endpoints."""
+    path = request.url.path
+    if path in AUTH_EXEMPT_ROUTES or not path.startswith("/api/"):
+        return await call_next(request)
+    if backend_app and not backend_app.is_logged_in():
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+    return await call_next(request)
+
+# ==================== AUTH ====================
+
+@app.get("/api/auth/status")
+async def auth_status():
+    """Check current login state."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    logged_in = backend_app.is_logged_in()
+    user_info = backend_app.get_user_info() if logged_in else {}
+    onboarding = backend_app.session.get("onboarding_completed", False) if logged_in else False
+    return {
+        "logged_in": logged_in,
+        "email": user_info.get("email", ""),
+        "provider": user_info.get("provider", ""),
+        "onboarding_completed": onboarding,
+    }
+
+@app.post("/api/auth/login")
+async def auth_login(request: LoginRequest):
+    """Log in after OAuth completes. Reads email from saved OAuth tokens."""
+    if not backend_app or not oauth_manager:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    provider = request.provider
+    if provider not in ("google", "microsoft"):
+        raise HTTPException(status_code=400, detail="Provider must be 'google' or 'microsoft'")
+    tokens = oauth_manager.load_tokens(provider)
+    if not tokens:
+        raise HTTPException(status_code=400, detail=f"No OAuth tokens found for {provider}. Connect first.")
+    email = tokens.get("email", f"user@{provider}.com")
+    backend_app.login(provider, email)
+    return {"success": True, "email": email, "provider": provider}
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    """Log out the current user."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    backend_app.logout()
+    return {"success": True}
+
+# ==================== ONBOARDING ====================
+
+@app.get("/api/onboarding/status")
+async def onboarding_status():
+    """Check if onboarding has been completed."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    completed = backend_app.session.get("onboarding_completed", False)
+    return {"completed": completed}
+
+@app.post("/api/onboarding/complete")
+async def onboarding_complete():
+    """Mark onboarding as completed."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    backend_app.session["onboarding_completed"] = True
+    backend_app.save_session()
+    return {"success": True}
+
+# ==================== PERMISSIONS ====================
+
+@app.post("/api/permissions/open")
+async def open_permission_settings(req: PermissionRequest):
+    """Open the specific macOS System Settings pane for a permission."""
+    import subprocess
+    PERM_URLS = {
+        "microphone": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+        "screen_recording": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        "accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        "input_monitoring": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+    }
+    url = PERM_URLS.get(req.permission)
+    if not url:
+        raise HTTPException(status_code=400, detail=f"Unknown permission: {req.permission}")
+    subprocess.Popen(["open", url])
+    return {"success": True, "opened": req.permission}
+
+@app.get("/api/permissions/status")
+async def get_permission_status():
+    """Check which macOS permissions are granted (proxy via device detection)."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    backend_app.detect_devices()
+    return {
+        "microphone": backend_app.microphone_device is not None,
+        "system_audio": backend_app.blackhole_device is not None,
+        "screen_recording": False,
     }
 
 # ==================== DEVICES ====================
@@ -592,6 +713,80 @@ async def optimize_journal_entry(entry_id: str):
         }
     }
 
+class JournalUpdate(BaseModel):
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+@app.put("/api/journal/{entry_id}")
+async def update_journal_entry(entry_id: str, update: JournalUpdate):
+    """Update a journal entry's content or tags."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    entries = backend_app.get_journal_entries()
+    for entry in entries:
+        if entry.get("id") == entry_id:
+            if update.content is not None:
+                entry["content"] = update.content
+            if update.tags is not None:
+                entry["tags"] = update.tags
+            backend_app.save_journal()
+            return {"journalEntry": entry}
+    raise HTTPException(status_code=404, detail="Journal entry not found")
+
+# ==================== STORAGE ====================
+
+@app.get("/api/storage/usage")
+async def get_storage_usage():
+    """Get disk usage for recordings directory."""
+    import glob
+    base_dir = backend_app.history_directory if backend_app else "~/Documents/Audio Recordings"
+    base_dir = os.path.expanduser(base_dir)
+    recordings_size = 0
+    transcripts_size = 0
+    try:
+        for f in glob.glob(os.path.join(base_dir, "**/*.wav"), recursive=True):
+            recordings_size += os.path.getsize(f)
+        for f in glob.glob(os.path.join(base_dir, "**/*.txt"), recursive=True):
+            transcripts_size += os.path.getsize(f)
+    except Exception:
+        pass
+    history_size = 0
+    try:
+        hf = getattr(backend_app, 'history_file', 'audio_history.json')
+        if os.path.exists(hf):
+            history_size = os.path.getsize(hf)
+    except Exception:
+        pass
+    return {
+        "recordings_bytes": recordings_size,
+        "transcripts_bytes": transcripts_size,
+        "summaries_bytes": history_size,
+        "total_bytes": recordings_size + transcripts_size + history_size,
+        "storage_path": base_dir,
+    }
+
+# ==================== RECORDING PAUSE/RESUME ====================
+
+@app.post("/api/recordings/pause")
+async def pause_recording():
+    """Pause the current recording."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    if not backend_app.is_recording:
+        raise HTTPException(status_code=409, detail="No recording in progress")
+    backend_app.pause_recording()
+    return {"success": True, "message": "Recording paused"}
+
+@app.post("/api/recordings/resume")
+async def resume_recording():
+    """Resume a paused recording."""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    if not backend_app.is_recording:
+        raise HTTPException(status_code=409, detail="No recording in progress")
+    backend_app.resume_recording()
+    return {"success": True, "message": "Recording resumed"}
+
 # ==================== OLLAMA ====================
 
 @app.get("/api/ollama/health")
@@ -617,11 +812,14 @@ async def get_settings():
     # Access settings from the ConfigParser
     config = backend_app.config
     
-    # Get API key status safely
+    # Get API key status safely (check both config file and keychain)
     has_gemini_key = False
     try:
         gemini_key = config.get('API_KEYS', 'gemini', fallback='')
         has_gemini_key = bool(gemini_key and len(gemini_key) > 0)
+        if not has_gemini_key:
+            keychain_key = secure_store.get_api_key('gemini')
+            has_gemini_key = bool(keychain_key)
     except Exception:
         pass
 
@@ -639,12 +837,36 @@ async def get_settings():
     except Exception:
         pass
     
+    # Check other API key statuses
+    has_openai_key = bool(secure_store.get_api_key("openai"))
+    has_anthropic_key = bool(secure_store.get_api_key("anthropic"))
+
+    # General preferences
+    launch_on_startup = True
+    show_in_menubar = True
+    dark_mode = True
+    language = "en"
+    try:
+        if config.has_section("PREFERENCES"):
+            launch_on_startup = config.getboolean("PREFERENCES", "launch_on_startup", fallback=True)
+            show_in_menubar = config.getboolean("PREFERENCES", "show_in_menubar", fallback=True)
+            dark_mode = config.getboolean("PREFERENCES", "dark_mode", fallback=True)
+            language = config.get("PREFERENCES", "language", fallback="en")
+    except Exception:
+        pass
+
     return {
         "llm_provider": llm_provider,
         "gemini_model": "gemini-2.0-flash-exp",
         "ollama_model": ollama_model,
         "has_gemini_key": has_gemini_key,
-        "recording_directory": backend_app.history_directory
+        "has_openai_key": has_openai_key,
+        "has_anthropic_key": has_anthropic_key,
+        "recording_directory": backend_app.history_directory,
+        "launch_on_startup": launch_on_startup,
+        "show_in_menubar": show_in_menubar,
+        "dark_mode": dark_mode,
+        "language": language,
     }
 
 @app.put("/api/settings")
@@ -664,19 +886,32 @@ async def update_settings(settings: SettingsUpdate):
     if not config.has_section("SETTINGS"):
         config.add_section("SETTINGS")
 
-    # Store API key in keychain (secure), NOT in the config file
-    if settings.gemini_api_key:
-        stored = secure_store.set_api_key("gemini", settings.gemini_api_key)
-        if not stored:
-            # Fallback: write to config file only if keychain unavailable
-            if not config.has_section("API_KEYS"):
-                config.add_section("API_KEYS")
-            config.set("API_KEYS", "gemini", settings.gemini_api_key)
+    # Store API keys in keychain (secure), NOT in the config file
+    for provider, key_value in [("gemini", settings.gemini_api_key), ("openai", settings.openai_api_key), ("anthropic", settings.anthropic_api_key)]:
+        if key_value:
+            stored = secure_store.set_api_key(provider, key_value)
+            if not stored:
+                if not config.has_section("API_KEYS"):
+                    config.add_section("API_KEYS")
+                config.set("API_KEYS", provider, key_value)
 
     if settings.llm_provider:
         config.set("SETTINGS", "default_llm", settings.llm_provider)
     if settings.ollama_model:
         config.set("SETTINGS", "ollama_model", settings.ollama_model)
+
+    # General preferences
+    if any(v is not None for v in [settings.launch_on_startup, settings.show_in_menubar, settings.dark_mode, settings.language]):
+        if not config.has_section("PREFERENCES"):
+            config.add_section("PREFERENCES")
+        if settings.launch_on_startup is not None:
+            config.set("PREFERENCES", "launch_on_startup", str(settings.launch_on_startup))
+        if settings.show_in_menubar is not None:
+            config.set("PREFERENCES", "show_in_menubar", str(settings.show_in_menubar))
+        if settings.dark_mode is not None:
+            config.set("PREFERENCES", "dark_mode", str(settings.dark_mode))
+        if settings.language is not None:
+            config.set("PREFERENCES", "language", settings.language)
 
     with open(config_path, "w") as f:
         config.write(f)

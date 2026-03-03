@@ -15,6 +15,8 @@ import {
   Zap,
   FileText,
   Loader2,
+  X,
+  Check,
 } from "lucide-react";
 import { getApiUrl, getApiHeaders } from "../config/api";
 
@@ -88,7 +90,7 @@ function backendToJournalEntry(raw: any, index: number): JournalEntry {
     title: deriveTitle(raw.entry),
     preview: derivePreview(raw.entry),
     mood: MOODS[index % MOODS.length],
-    tags: [],
+    tags: Array.isArray(raw.tags) ? raw.tags : [],
   };
 }
 
@@ -290,6 +292,63 @@ export function JournalView() {
 function EntryDetail({ entry, onUpdate }: { entry: JournalEntry; onUpdate: (e: JournalEntry) => void }) {
   const moodCfg = MOOD_CONFIG[entry.mood];
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState(entry.entry);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [showTagInput, setShowTagInput] = useState(false);
+  const [newTagText, setNewTagText] = useState("");
+
+  async function saveEdit() {
+    setIsSavingEdit(true);
+    try {
+      const res = await fetch(getApiUrl(`/api/journal/${entry.id}`), {
+        method: "PUT",
+        headers: getApiHeaders(),
+        body: JSON.stringify({ content: editText }),
+      });
+      if (res.ok) {
+        onUpdate({
+          ...entry,
+          entry: editText,
+          title: deriveTitle(editText),
+          preview: derivePreview(editText),
+        });
+        setIsEditing(false);
+      }
+    } catch (err) {
+      console.error("Failed to save journal entry:", err);
+    } finally {
+      setIsSavingEdit(false);
+    }
+  }
+
+  async function updateTags(newTags: string[]) {
+    try {
+      const res = await fetch(getApiUrl(`/api/journal/${entry.id}`), {
+        method: "PUT",
+        headers: getApiHeaders(),
+        body: JSON.stringify({ tags: newTags }),
+      });
+      if (res.ok) {
+        onUpdate({ ...entry, tags: newTags });
+      }
+    } catch (err) {
+      console.error("Failed to update tags:", err);
+    }
+  }
+
+  function addTag() {
+    const tag = newTagText.trim().toLowerCase();
+    if (tag && !entry.tags.includes(tag)) {
+      updateTags([...entry.tags, tag]);
+    }
+    setNewTagText("");
+    setShowTagInput(false);
+  }
+
+  function removeTag(tag: string) {
+    updateTags(entry.tags.filter((t) => t !== tag));
+  }
 
   async function optimizeEntry() {
     setIsOptimizing(true);
@@ -323,19 +382,53 @@ function EntryDetail({ entry, onUpdate }: { entry: JournalEntry; onUpdate: (e: J
           >
             {moodCfg.icon} {moodCfg.label}
           </span>
-          <button className="ml-auto p-1.5 rounded-md hover:bg-white/[0.04] transition-colors">
-            <Edit3 size={11} className="text-white/25" />
+          <button
+            onClick={() => { setIsEditing(!isEditing); setEditText(entry.entry); }}
+            className="ml-auto p-1.5 rounded-md hover:bg-white/[0.04] transition-colors"
+          >
+            <Edit3 size={11} className={isEditing ? "text-[#FFD100]" : "text-white/25"} />
           </button>
         </div>
 
         <h2 className="text-white/85 mb-3">{entry.title}</h2>
 
         {/* Content */}
-        <div className="text-[13px] text-white/50 mb-5 space-y-3">
-          {entry.entry.split("\n").filter((l) => l.trim()).map((paragraph, i) => (
-            <p key={i}>{paragraph}</p>
-          ))}
-        </div>
+        {isEditing ? (
+          <div className="mb-5">
+            <textarea
+              autoFocus
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              rows={Math.max(6, editText.split("\n").length + 2)}
+              className="w-full p-3 rounded-lg text-[13px] text-white/60 placeholder:text-white/15 outline-none resize-none"
+              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+            />
+            <div className="flex gap-1.5 mt-2">
+              <button
+                onClick={saveEdit}
+                disabled={isSavingEdit || editText.trim() === entry.entry}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] transition-all disabled:opacity-30"
+                style={{ background: "rgba(109,213,140,0.1)", color: "#6dd58c", border: "1px solid rgba(109,213,140,0.15)" }}
+              >
+                {isSavingEdit ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}
+                Save
+              </button>
+              <button
+                onClick={() => { setIsEditing(false); setEditText(entry.entry); }}
+                className="px-3 py-1.5 rounded-md text-[10px] text-white/30 hover:text-white/50 transition-colors"
+                style={{ background: "rgba(255,255,255,0.03)" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="text-[13px] text-white/50 mb-5 space-y-3">
+            {entry.entry.split("\n").filter((l) => l.trim()).map((paragraph, i) => (
+              <p key={i}>{paragraph}</p>
+            ))}
+          </div>
+        )}
 
         {/* AI Insights */}
         <div>
@@ -375,19 +468,54 @@ function EntryDetail({ entry, onUpdate }: { entry: JournalEntry; onUpdate: (e: J
         </div>
 
         {/* Tags */}
-        {entry.tags.length > 0 && (
-          <div className="mt-4 flex items-center gap-1.5">
+        <div className="mt-4">
+          <div className="flex items-center gap-1.5 flex-wrap">
             {entry.tags.map((tag) => (
               <span
                 key={tag}
-                className="text-[9px] px-2 py-0.5 rounded-md text-white/25"
+                className="group flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-md text-white/25"
                 style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.04)" }}
               >
                 #{tag}
+                <button
+                  onClick={() => removeTag(tag)}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity ml-0.5"
+                >
+                  <X size={8} className="text-white/30 hover:text-white/60" />
+                </button>
               </span>
             ))}
+            {showTagInput ? (
+              <form
+                onSubmit={(e) => { e.preventDefault(); addTag(); }}
+                className="flex items-center gap-1"
+              >
+                <input
+                  autoFocus
+                  type="text"
+                  value={newTagText}
+                  onChange={(e) => setNewTagText(e.target.value)}
+                  onBlur={() => { if (!newTagText.trim()) setShowTagInput(false); }}
+                  onKeyDown={(e) => { if (e.key === "Escape") { setShowTagInput(false); setNewTagText(""); } }}
+                  placeholder="tag name"
+                  className="w-20 px-1.5 py-0.5 rounded text-[9px] text-white/50 placeholder:text-white/15 outline-none"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                />
+                <button type="submit" disabled={!newTagText.trim()} className="disabled:opacity-30">
+                  <Check size={9} className="text-white/30 hover:text-white/60" />
+                </button>
+              </form>
+            ) : (
+              <button
+                onClick={() => setShowTagInput(true)}
+                className="flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-md text-white/15 hover:text-white/30 transition-colors"
+                style={{ background: "rgba(255,255,255,0.02)", border: "1px dashed rgba(255,255,255,0.06)" }}
+              >
+                <Plus size={8} /> tag
+              </button>
+            )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
