@@ -80,6 +80,7 @@ export function RecordingView({ onStop }: RecordingViewProps) {
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const durationIntervalRef = useRef<number | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
   const speakerColorMap = useRef<Record<string, string>>({});
   const speakerColorIdx = useRef(0);
   const elapsedRef = useRef(0);
@@ -122,6 +123,7 @@ export function RecordingView({ onStop }: RecordingViewProps) {
   useEffect(() => {
     return () => {
       if (durationIntervalRef.current) clearInterval(durationIntervalRef.current);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (wsRef.current) wsRef.current.close();
     };
   }, []);
@@ -185,7 +187,7 @@ export function RecordingView({ onStop }: RecordingViewProps) {
           if (!event.wasClean && reconnectAttempts < MAX_RECONNECTS) {
             reconnectAttempts++;
             console.log(`WebSocket reconnecting (attempt ${reconnectAttempts})...`);
-            setTimeout(connect, RECONNECT_DELAY * reconnectAttempts);
+            reconnectTimerRef.current = window.setTimeout(connect, RECONNECT_DELAY * reconnectAttempts);
           }
         };
 
@@ -194,7 +196,7 @@ export function RecordingView({ onStop }: RecordingViewProps) {
         console.error("Failed to connect WebSocket:", err);
         if (reconnectAttempts < MAX_RECONNECTS) {
           reconnectAttempts++;
-          setTimeout(connect, RECONNECT_DELAY * reconnectAttempts);
+          reconnectTimerRef.current = window.setTimeout(connect, RECONNECT_DELAY * reconnectAttempts);
         }
       }
     }
@@ -529,7 +531,12 @@ export function RecordingView({ onStop }: RecordingViewProps) {
           {/* Controls */}
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setIsMuted(!isMuted)}
+              onClick={async () => {
+                try {
+                  const res = await fetch(getApiUrl("/api/recordings/mute"), { method: "POST", headers: getApiHeaders() });
+                  if (res.ok) setIsMuted(!isMuted);
+                } catch { /* ignore */ }
+              }}
               className="w-10 h-10 rounded-xl flex items-center justify-center transition-all"
               style={{
                 background: isMuted ? "rgba(239,68,68,0.12)" : "rgba(255,255,255,0.04)",

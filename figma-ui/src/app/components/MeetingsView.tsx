@@ -21,6 +21,7 @@ export interface MeetingFull {
   id: string;
   title: string;
   date: string;
+  rawDate: string;
   time: string;
   duration: string;
   tag: string;
@@ -42,6 +43,17 @@ const TAG_COLORS: Record<string, string> = {
   "1:1": "#f97316",
   engineering: "#2774AE",
 };
+
+function isWithinLastWeek(rawDate: string): boolean {
+  try {
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const d = new Date(rawDate);
+    return !isNaN(d.getTime()) && d >= weekAgo;
+  } catch {
+    return false;
+  }
+}
 
 function formatDurationStr(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -82,6 +94,7 @@ export function backendToMeetingFull(m: BackendMeeting): MeetingFull {
     id: m.id,
     title: m.title,
     date: formatDateLabel(m.date),
+    rawDate: m.date,
     time: formatTimeStr(m.date),
     duration: formatDurationStr(m.duration),
     tag: firstTag,
@@ -154,7 +167,7 @@ export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsV
 
   const filtered = allMeetings.filter((m) => {
     if (activeTab === "flagged" && !m.flagged) return false;
-    if (activeTab === "week" && !["Today", "Yesterday"].includes(m.date)) return false;
+    if (activeTab === "week" && !isWithinLastWeek(m.rawDate)) return false;
     if (search && searchResults === null && !m.title.toLowerCase().includes(search.toLowerCase())) return false;
     if (filterMode === "has_summary" && !m.hasSummary) return false;
     if (filterMode === "has_transcript" && !m.hasTranscript) return false;
@@ -163,7 +176,7 @@ export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsV
 
   const TABS = [
     { id: "all", label: "All", count: allMeetings.length },
-    { id: "week", label: "This Week", count: allMeetings.filter((m) => ["Today", "Yesterday"].includes(m.date)).length },
+    { id: "week", label: "This Week", count: allMeetings.filter((m) => isWithinLastWeek(m.rawDate)).length },
     { id: "flagged", label: "Flagged", count: allMeetings.filter((m) => m.flagged).length },
   ];
 

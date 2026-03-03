@@ -57,10 +57,27 @@ _event_loop: Optional[asyncio.AbstractEventLoop] = None
 _oauth_states: dict[str, float] = {}
 _OAUTH_STATE_TTL = 600  # 10 minutes
 
+def parse_duration_to_seconds(duration_val) -> int:
+    """Convert duration string like '5m 23s' or '24s' or int to seconds."""
+    if isinstance(duration_val, (int, float)):
+        return int(duration_val)
+    if not isinstance(duration_val, str):
+        return 0
+    import re
+    total = 0
+    hours = re.findall(r'(\d+)\s*h', duration_val)
+    mins = re.findall(r'(\d+)\s*m', duration_val)
+    secs = re.findall(r'(\d+)\s*s', duration_val)
+    if hours: total += int(hours[0]) * 3600
+    if mins: total += int(mins[0]) * 60
+    if secs: total += int(secs[0])
+    return total
+
 # Pydantic models
 class RecordingStartRequest(BaseModel):
     title: Optional[str] = None
     speakers: Optional[List[str]] = []
+    device: Optional[str] = None
 
 class RecordingStopResponse(BaseModel):
     success: bool
@@ -126,7 +143,7 @@ async def broadcast_transcript(text: str):
     """Send live transcript updates to all connected WebSocket clients"""
     for ws in active_websockets:
         try:
-            await ws.send_json({"type": "transcript", "text": text})
+            await ws.send_json({"type": "transcript_update", "text": text})
         except Exception:
             pass
 
@@ -134,7 +151,7 @@ async def broadcast_level(level: float):
     """Send audio level updates to all connected WebSocket clients"""
     for ws in active_websockets:
         try:
-            await ws.send_json({"type": "level", "value": level})
+            await ws.send_json({"type": "audio_level", "value": level})
         except Exception:
             pass
 
@@ -143,6 +160,14 @@ async def broadcast_live_summary(data: dict):
     for ws in active_websockets:
         try:
             await ws.send_json({"type": "live_summary", "data": data})
+        except Exception:
+            pass
+
+async def broadcast_completion():
+    """Send recording-complete event to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "status", "status": "complete"})
         except Exception:
             pass
 
@@ -164,12 +189,20 @@ def live_summary_callback(data: dict):
     if _event_loop:
         asyncio.run_coroutine_threadsafe(broadcast_live_summary(data), _event_loop)
 
+def result_callback(summary_data):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_completion(), _event_loop)
+
 @app.on_event("startup")
 async def startup():
     """Initialize the backend on server start"""
     global backend_app, oauth_manager, _event_loop
     _event_loop = asyncio.get_running_loop()
     backend_app = EnhancedAudioApp()
+    backend_app.status_callback = status_callback
+    backend_app.result_callback = result_callback
+    backend_app.transcript_callback = transcript_callback
+    backend_app.level_callback = level_callback
     backend_app.summary_callback = live_summary_callback
     oauth_manager = OAuthManager()
     print("✓ Backend initialized")
@@ -306,11 +339,9 @@ async def get_devices():
     
     backend_app.detect_devices()
     return {
-        "devices": [
-            {"id": "microphone", "name": "Microphone", "available": backend_app.microphone_device is not None},
-            {"id": "system", "name": "System Audio (BlackHole)", "available": backend_app.blackhole_device is not None},
-            {"id": "hybrid", "name": "Hybrid (BBrew)", "available": backend_app.hybrid_device is not None},
-        ],
+        "microphone": {"name": "Microphone", "available": backend_app.microphone_device is not None},
+        "system_audio": {"name": "System Audio (BlackHole)", "available": backend_app.blackhole_device is not None},
+        "hybrid": {"name": "Hybrid (BBrew)", "available": backend_app.hybrid_device is not None},
         "default": "microphone"
     }
 
@@ -324,7 +355,12 @@ async def start_recording(request: RecordingStartRequest):
     
     if backend_app.is_recording:
         raise HTTPException(status_code=409, detail="Recording already in progress")
-    
+
+    # Apply device selection
+    if request.device:
+        device_map = {"microphone": "microphone", "system_audio": "system", "hybrid": "hybrid"}
+        backend_app.recording_mode = device_map.get(request.device, "microphone")
+
     # Start recording in background thread
     threading.Thread(target=backend_app.start_recording, daemon=True).start()
     
@@ -333,6 +369,16 @@ async def start_recording(request: RecordingStartRequest):
         "message": "Recording started",
         "title": request.title
     }
+
+@app.post("/api/recordings/mute")
+async def toggle_mute():
+    """Toggle mute state on the recording"""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    if not backend_app.is_recording:
+        raise HTTPException(status_code=409, detail="No recording in progress")
+    backend_app.is_muted = not backend_app.is_muted
+    return {"success": True, "muted": backend_app.is_muted}
 
 @app.post("/api/recordings/stop")
 async def stop_recording():
@@ -419,7 +465,7 @@ async def get_meetings():
             "id": str(idx),
             "title": entry.get("title", f"Meeting {idx + 1}"),
             "date": entry.get("timestamp", entry.get("date", "")),
-            "duration": entry.get("duration", entry.get("duration_seconds", 0)),
+            "duration": parse_duration_to_seconds(entry.get("duration", entry.get("duration_seconds", 0))),
             "speakers": speakers,
             "transcript": entry.get("transcript", ""),
             "executive_summary": entry.get("executive_summary", ""),
@@ -432,6 +478,80 @@ async def get_meetings():
         meetings.append(meeting)
     
     return {"meetings": meetings}
+
+# ==================== SEARCH ====================
+# NOTE: This must be defined BEFORE /api/meetings/{meeting_id} to avoid
+# FastAPI matching "search" as a meeting_id parameter.
+
+@app.get("/api/meetings/search")
+async def search_meetings(q: str = "", fields: str = "title,transcript,executive_summary,speakers"):
+    """Full-text search across all meetings"""
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+
+    if not q or len(q.strip()) < 2:
+        return {"results": [], "query": q}
+
+    query = q.strip().lower()
+    search_fields = [f.strip() for f in fields.split(",")]
+    history = backend_app.chat_history or []
+    results = []
+
+    for idx, entry in enumerate(history):
+        if not isinstance(entry, dict):
+            continue
+
+        matches = []
+
+        # Search in text fields
+        for field in search_fields:
+            value = ""
+            if field == "speakers":
+                speaker_info = entry.get("speaker_info", {})
+                if isinstance(speaker_info, dict):
+                    value = " ".join(speaker_info.get("list", []))
+                elif isinstance(speaker_info, list):
+                    value = " ".join(str(s) for s in speaker_info)
+            elif field == "highlights":
+                value = " ".join(entry.get("highlights", []))
+            else:
+                value = str(entry.get(field, ""))
+
+            if query in value.lower():
+                # Extract a snippet around the match
+                lower_val = value.lower()
+                match_pos = lower_val.find(query)
+                start = max(0, match_pos - 60)
+                end = min(len(value), match_pos + len(query) + 60)
+                snippet = value[start:end]
+                if start > 0:
+                    snippet = "..." + snippet
+                if end < len(value):
+                    snippet = snippet + "..."
+
+                matches.append({
+                    "field": field,
+                    "snippet": snippet
+                })
+
+        if matches:
+            # Get speaker info
+            speaker_info = entry.get("speaker_info", {})
+            speakers = []
+            if isinstance(speaker_info, dict):
+                speakers = speaker_info.get("list", [])
+            elif isinstance(speaker_info, list):
+                speakers = speaker_info
+
+            results.append({
+                "meeting_id": str(idx),
+                "title": entry.get("title", f"Meeting {idx + 1}"),
+                "date": entry.get("timestamp", entry.get("date", "")),
+                "speakers": speakers,
+                "matches": matches
+            })
+
+    return {"results": results, "query": q, "total": len(results)}
 
 @app.get("/api/meetings/{meeting_id}")
 async def get_meeting(meeting_id: str):
@@ -462,7 +582,7 @@ async def get_meeting(meeting_id: str):
             "id": meeting_id,
             "title": entry.get("title", f"Meeting {idx + 1}"),
             "date": entry.get("timestamp", entry.get("date", "")),
-            "duration": entry.get("duration", entry.get("duration_seconds", 0)),
+            "duration": parse_duration_to_seconds(entry.get("duration", entry.get("duration_seconds", 0))),
             "speakers": speakers,
             "transcript": entry.get("transcript", ""),
             "diarized_transcript": entry.get("diarized_transcript", []),
@@ -522,78 +642,6 @@ async def get_all_tags():
         tags = {"Follow-up", "Important", "Meeting Notes"}
     
     return {"tags": sorted(list(tags))}
-
-# ==================== SEARCH ====================
-
-@app.get("/api/meetings/search")
-async def search_meetings(q: str = "", fields: str = "title,transcript,executive_summary,speakers"):
-    """Full-text search across all meetings"""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    
-    if not q or len(q.strip()) < 2:
-        return {"results": [], "query": q}
-    
-    query = q.strip().lower()
-    search_fields = [f.strip() for f in fields.split(",")]
-    history = backend_app.chat_history or []
-    results = []
-    
-    for idx, entry in enumerate(history):
-        if not isinstance(entry, dict):
-            continue
-        
-        matches = []
-        
-        # Search in text fields
-        for field in search_fields:
-            value = ""
-            if field == "speakers":
-                speaker_info = entry.get("speaker_info", {})
-                if isinstance(speaker_info, dict):
-                    value = " ".join(speaker_info.get("list", []))
-                elif isinstance(speaker_info, list):
-                    value = " ".join(str(s) for s in speaker_info)
-            elif field == "highlights":
-                value = " ".join(entry.get("highlights", []))
-            else:
-                value = str(entry.get(field, ""))
-            
-            if query in value.lower():
-                # Extract a snippet around the match
-                lower_val = value.lower()
-                match_pos = lower_val.find(query)
-                start = max(0, match_pos - 60)
-                end = min(len(value), match_pos + len(query) + 60)
-                snippet = value[start:end]
-                if start > 0:
-                    snippet = "..." + snippet
-                if end < len(value):
-                    snippet = snippet + "..."
-                
-                matches.append({
-                    "field": field,
-                    "snippet": snippet
-                })
-        
-        if matches:
-            # Get speaker info
-            speaker_info = entry.get("speaker_info", {})
-            speakers = []
-            if isinstance(speaker_info, dict):
-                speakers = speaker_info.get("list", [])
-            elif isinstance(speaker_info, list):
-                speakers = speaker_info
-            
-            results.append({
-                "meeting_id": str(idx),
-                "title": entry.get("title", f"Meeting {idx + 1}"),
-                "date": entry.get("timestamp", entry.get("date", "")),
-                "speakers": speakers,
-                "matches": matches
-            })
-    
-    return {"results": results, "query": q, "total": len(results)}
 
 # ==================== TASKS ====================
 
@@ -1321,8 +1369,11 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             # Keep connection alive, receive any commands
             data = await websocket.receive_text()
-            message = json.loads(data)
-            
+            try:
+                message = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
             if message.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
