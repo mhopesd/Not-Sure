@@ -58,6 +58,7 @@ class EnhancedAudioApp:
         self.recording_thread = None
         self.transcription_thread = None
         self.temp_audio_file = None
+        self.part_file = None
         self.recording_mode = "microphone"
         self.recording_start_time = None
         self.recording_end_time = None 
@@ -84,6 +85,7 @@ class EnhancedAudioApp:
         self.transcript_callback = transcript_callback
         self.level_callback = level_callback
         self.summary_callback = None  # Set by API server for live summary streaming
+        self.is_muted = False
         self._state_lock = threading.Lock()  # Protects live_transcript_text and live_insights
         self.live_transcript_text = ""  # Accumulated transcript for live summary
         self.live_insights = {           # Running insights state
@@ -117,6 +119,16 @@ class EnhancedAudioApp:
             logger.info(f"ffmpeg resolved to: {self._ffmpeg_path}")
 
         self.detect_devices()
+
+        # Initialize session eagerly so api_server can access self.session directly
+        self.session_file = "session.json"
+        self.session = {}
+        if os.path.exists(self.session_file):
+            try:
+                with open(self.session_file, 'r') as f:
+                    self.session = json.load(f)
+            except Exception:
+                self.session = {}
 
         # Preload model with slight delay to ensure UI loop is ready if it relies on callbacks immediately
         threading.Timer(1.0, self._preload_model).start()
@@ -413,7 +425,11 @@ class EnhancedAudioApp:
             """This is called (from a separate thread) for each audio block."""
             if status:
                 logger.warning(f"Audio Callback Status: {status}")
-            
+
+            # Zero out audio data when muted
+            if self.is_muted:
+                indata = np.zeros_like(indata)
+
             # RMS Calculation for VU Meter
             if self.level_callback:
                 try:
@@ -1026,6 +1042,8 @@ Rules:
         if not self.temp_audio_file:
             logger.error("temp_audio_file is None")
             self.update_status("Error: No audio file path set")
+            if hasattr(self, 'error_callback') and self.error_callback:
+                self.error_callback("No audio file path set")
             return
 
         if not os.path.exists(self.temp_audio_file):
@@ -1038,11 +1056,15 @@ Rules:
                 except Exception as e:
                     logger.error(f"Late rename failed: {e}")
                     self.update_status("Error: Audio file not ready")
+                    if hasattr(self, 'error_callback') and self.error_callback:
+                        self.error_callback("Audio file not ready")
                     return
             else:
                 logger.error(f"Audio file does not exist: {self.temp_audio_file}")
                 logger.error(f"Part file exists: {hasattr(self, 'part_file') and self.part_file and os.path.exists(self.part_file)}")
                 self.update_status("Error: No audio file")
+                if hasattr(self, 'error_callback') and self.error_callback:
+                    self.error_callback("No audio file found")
                 return
 
         self.recording_end_time = datetime.now()
@@ -1089,6 +1111,8 @@ Rules:
             msg = f"Processing error: {str(e)}"
             self.update_status(msg)
             logger.error(f"{msg}\n{traceback.format_exc()}")
+            if hasattr(self, 'error_callback') and self.error_callback:
+                self.error_callback(str(e))
         finally:
             # Clean up temp files
             for f in [self.temp_audio_file, self.part_file]:

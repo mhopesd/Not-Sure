@@ -193,7 +193,6 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         const body: Record<string, string> = { llm_provider: aiProvider };
         if (aiProvider === "openai") body.openai_api_key = apiKey;
         else if (aiProvider === "anthropic") body.anthropic_api_key = apiKey;
-        else body.gemini_api_key = apiKey;
         await fetch(getApiUrl("/api/settings"), {
           method: "PUT",
           headers: getApiHeaders(),

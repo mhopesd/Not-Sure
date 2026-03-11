@@ -281,7 +281,10 @@ export function JournalView() {
             setEntries((prev) => prev.map((e) => (e.id === updated.id ? updated : e)));
           }} />
         ) : (
-          <EmptyJournal />
+          <EmptyJournal onPromptClick={(text) => {
+            setNewEntryText(text);
+            setShowNewEntry(true);
+          }} />
         )}
       </div>
     </div>
@@ -522,7 +525,7 @@ function EntryDetail({ entry, onUpdate }: { entry: JournalEntry; onUpdate: (e: J
 }
 
 /* Empty Journal State */
-function EmptyJournal() {
+function EmptyJournal({ onPromptClick }: { onPromptClick: (text: string) => void }) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-8">
       <div className="max-w-sm text-center">
@@ -542,6 +545,7 @@ function EmptyJournal() {
           {AI_PROMPTS.map((prompt, i) => (
             <button
               key={i}
+              onClick={() => onPromptClick(prompt.text)}
               className="w-full flex items-center gap-2.5 p-2.5 rounded-lg hover:bg-white/[0.03] transition-all text-left"
               style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.03)" }}
             >

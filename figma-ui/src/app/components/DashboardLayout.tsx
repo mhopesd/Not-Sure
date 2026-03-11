@@ -112,6 +112,7 @@ export function DashboardLayout() {
   const [isRecording, setIsRecording] = useState(false);
   const [meetings, setMeetings] = useState<BackendMeeting[]>([]);
   const [meetingsLoading, setMeetingsLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
   const integrations = useIntegrations();
 
   const fetchMeetings = useCallback(async () => {
@@ -152,6 +153,11 @@ export function DashboardLayout() {
     fetchMeetings();
   };
 
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    setActiveView("meetings");
+  };
+
   // Full-screen recording overlay
   if (isRecording) {
     return <RecordingView onStop={handleStopRecording} />;
@@ -167,6 +173,7 @@ export function DashboardLayout() {
           setActiveView={(v) => { setActiveView(v); setSelectedMeetingId(null); }}
           onRecord={handleStartRecording}
           meetingCount={meetings.length}
+          onSearch={handleSearch}
         />
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           <MeetingDetailView meetingId={selectedMeetingId} onBack={handleBackFromDetail} />
@@ -177,7 +184,7 @@ export function DashboardLayout() {
 
   return (
     <div className="flex h-full">
-      <Sidebar activeView={activeView} setActiveView={setActiveView} onRecord={handleStartRecording} meetingCount={meetings.length} />
+      <Sidebar activeView={activeView} setActiveView={setActiveView} onRecord={handleStartRecording} meetingCount={meetings.length} onSearch={handleSearch} />
 
       {/* ─── Main Content ─── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -203,8 +210,8 @@ export function DashboardLayout() {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
-          {activeView === "home" && <HomeView meetings={meetings} onSelectMeeting={handleSelectMeeting} integrations={integrations} />}
-          {activeView === "meetings" && <MeetingsView meetings={meetings} onSelectMeeting={handleSelectMeeting} onRefresh={fetchMeetings} />}
+          {activeView === "home" && <HomeView meetings={meetings} onSelectMeeting={handleSelectMeeting} integrations={integrations} onViewAll={() => setActiveView("meetings")} />}
+          {activeView === "meetings" && <MeetingsView meetings={meetings} onSelectMeeting={handleSelectMeeting} onRefresh={fetchMeetings} initialSearch={searchQuery} />}
           {activeView === "journal" && <JournalView />}
           {activeView === "settings" && <SettingsView />}
         </div>
@@ -219,12 +226,15 @@ function Sidebar({
   setActiveView,
   onRecord,
   meetingCount,
+  onSearch,
 }: {
   activeView: string;
   setActiveView: (v: string) => void;
   onRecord: () => void;
   meetingCount: number;
+  onSearch?: (query: string) => void;
 }) {
+  const [sidebarSearch, setSidebarSearch] = useState("");
   return (
     <div
       className="w-[200px] shrink-0 flex flex-col p-3 pb-2"
@@ -266,6 +276,14 @@ function Sidebar({
         <input
           type="text"
           placeholder="Search..."
+          value={sidebarSearch}
+          onChange={(e) => setSidebarSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && sidebarSearch.trim() && onSearch) {
+              onSearch(sidebarSearch.trim());
+              setSidebarSearch("");
+            }
+          }}
           className="w-full pl-7 pr-2.5 py-1.5 rounded-md text-[11px] text-white/60 placeholder:text-white/15 outline-none"
           style={{
             background: "rgba(255,255,255,0.03)",
@@ -460,7 +478,7 @@ function UpcomingEventsWidget({ integrations }: { integrations: ReturnType<typeo
 }
 
 /* ─── Home View ─── */
-function HomeView({ meetings, onSelectMeeting, integrations }: { meetings: BackendMeeting[]; onSelectMeeting: (id: string) => void; integrations: ReturnType<typeof useIntegrations> }) {
+function HomeView({ meetings, onSelectMeeting, integrations, onViewAll }: { meetings: BackendMeeting[]; onSelectMeeting: (id: string) => void; integrations: ReturnType<typeof useIntegrations>; onViewAll: () => void }) {
   // Convert backend meetings to preview format for the home view
   const recentPreviews: MeetingPreview[] = meetings.slice(0, 5).map((m) => {
     const firstTag = m.tags?.[0] || "meeting";
@@ -476,7 +494,7 @@ function HomeView({ meetings, onSelectMeeting, integrations }: { meetings: Backe
 
   // Compute stats from real data
   const totalMeetings = meetings.length;
-  const totalDuration = meetings.reduce((sum, m) => sum + (m.duration || 0), 0);
+  const totalDuration = meetings.reduce((sum, m) => sum + (typeof m.duration === 'number' ? m.duration : 0), 0);
   const totalHours = (totalDuration / 3600).toFixed(1);
   const totalActionItems = meetings.reduce((sum, m) => sum + (m.tasks?.length || 0), 0);
   const withSummary = meetings.filter((m) => m.executive_summary).length;
@@ -531,7 +549,7 @@ function HomeView({ meetings, onSelectMeeting, integrations }: { meetings: Backe
             <Clock size={11} className="text-white/25" />
             <span className="text-[10px] text-white/30 uppercase tracking-wider">Recent Meetings</span>
           </div>
-          <span className="text-[9px] text-[#2774AE] cursor-pointer" onClick={() => {}}>View all</span>
+          <span className="text-[9px] text-[#2774AE] cursor-pointer" onClick={onViewAll}>View all</span>
         </div>
         <div className="space-y-1">
           {recentPreviews.length > 0 ? (
