@@ -111,11 +111,12 @@ interface MeetingsViewProps {
   meetings: BackendMeeting[];
   onSelectMeeting: (id: string) => void;
   onRefresh?: () => void;
+  initialSearch?: string;
 }
 
-export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsViewProps) {
+export function MeetingsView({ meetings, onSelectMeeting, onRefresh, initialSearch }: MeetingsViewProps) {
   const [activeTab, setActiveTab] = useState("all");
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch || "");
   const [searchResults, setSearchResults] = useState<any[] | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [filterMode, setFilterMode] = useState<"all" | "has_summary" | "has_transcript">("all");
@@ -123,6 +124,11 @@ export function MeetingsView({ meetings, onSelectMeeting, onRefresh }: MeetingsV
   const filterRef = useRef<HTMLDivElement>(null);
 
   const allMeetings = useMemo(() => meetings.map(backendToMeetingFull), [meetings]);
+
+  // Update search when initialSearch prop changes (e.g. from sidebar search)
+  useEffect(() => {
+    if (initialSearch) setSearch(initialSearch);
+  }, [initialSearch]);
 
   // Debounced search against backend
   useEffect(() => {

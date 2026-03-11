@@ -1042,6 +1042,8 @@ Rules:
         if not self.temp_audio_file:
             logger.error("temp_audio_file is None")
             self.update_status("Error: No audio file path set")
+            if hasattr(self, 'error_callback') and self.error_callback:
+                self.error_callback("No audio file path set")
             return
 
         if not os.path.exists(self.temp_audio_file):
@@ -1054,11 +1056,15 @@ Rules:
                 except Exception as e:
                     logger.error(f"Late rename failed: {e}")
                     self.update_status("Error: Audio file not ready")
+                    if hasattr(self, 'error_callback') and self.error_callback:
+                        self.error_callback("Audio file not ready")
                     return
             else:
                 logger.error(f"Audio file does not exist: {self.temp_audio_file}")
                 logger.error(f"Part file exists: {hasattr(self, 'part_file') and self.part_file and os.path.exists(self.part_file)}")
                 self.update_status("Error: No audio file")
+                if hasattr(self, 'error_callback') and self.error_callback:
+                    self.error_callback("No audio file found")
                 return
 
         self.recording_end_time = datetime.now()
@@ -1105,6 +1111,8 @@ Rules:
             msg = f"Processing error: {str(e)}"
             self.update_status(msg)
             logger.error(f"{msg}\n{traceback.format_exc()}")
+            if hasattr(self, 'error_callback') and self.error_callback:
+                self.error_callback(str(e))
         finally:
             # Clean up temp files
             for f in [self.temp_audio_file, self.part_file]:

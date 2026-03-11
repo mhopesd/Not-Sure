@@ -5,6 +5,7 @@ This server exposes the Python backend (audio recording, transcription, summariz
 as REST and WebSocket endpoints for the React frontend.
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Audio Summary API",
     description="Local API for audio recording, transcription, and AI summarization",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Enable CORS for frontend
@@ -171,6 +172,14 @@ async def broadcast_completion():
         except Exception:
             pass
 
+async def broadcast_error(error_message: str):
+    """Send processing-error event to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "status", "status": "error", "error": error_message})
+        except Exception:
+            pass
+
 # Thread-safe callback wrappers — these are called from backend threads,
 # so we must use run_coroutine_threadsafe to schedule onto the event loop.
 def status_callback(message: str):
@@ -193,20 +202,29 @@ def result_callback(summary_data):
     if _event_loop:
         asyncio.run_coroutine_threadsafe(broadcast_completion(), _event_loop)
 
-@app.on_event("startup")
-async def startup():
+def error_callback(error_message: str):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_error(error_message), _event_loop)
+
+@asynccontextmanager
+async def lifespan(app):
     """Initialize the backend on server start"""
     global backend_app, oauth_manager, _event_loop
     _event_loop = asyncio.get_running_loop()
     backend_app = EnhancedAudioApp()
     backend_app.status_callback = status_callback
     backend_app.result_callback = result_callback
+    backend_app.error_callback = error_callback
     backend_app.transcript_callback = transcript_callback
     backend_app.level_callback = level_callback
     backend_app.summary_callback = live_summary_callback
     oauth_manager = OAuthManager()
     print("✓ Backend initialized")
     print("✓ OAuth manager initialized")
+    yield
+
+# Wire lifespan after definition (app is created earlier for route decorators)
+app.router.lifespan_context = lifespan
 
 @app.get("/")
 async def root():

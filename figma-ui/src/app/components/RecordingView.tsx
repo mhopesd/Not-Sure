@@ -172,6 +172,9 @@ export function RecordingView({ onStop }: RecordingViewProps) {
                 else if (message.status === "complete") {
                   setStatus("idle");
                   onStopRef.current();
+                } else if (message.status === "error") {
+                  setError(message.error || "An error occurred during processing");
+                  setStatus("idle");
                 }
                 break;
             }
