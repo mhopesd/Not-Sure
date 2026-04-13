@@ -3,26 +3,17 @@ import {
   Home,
   Mic,
   FileText,
-  BookOpen,
   Settings,
   Search,
   Plus,
   Clock,
-  Calendar,
-  CalendarDays,
   ChevronRight,
   Sparkles,
   Zap,
   BarChart3,
-  Users,
-  Loader2,
-  Plug,
 } from "lucide-react";
-import { useIntegrations } from "../hooks/useIntegrations";
-import { useAuth } from "../hooks/useAuth";
 import { MeetingsView } from "./MeetingsView";
 import { MeetingDetailView } from "./MeetingDetailView";
-import { JournalView } from "./JournalView";
 import { SettingsView } from "./SettingsView";
 import { RecordingView } from "./RecordingView";
 import { getApiUrl, getApiHeaders } from "../config/api";
@@ -30,7 +21,6 @@ import { getApiUrl, getApiHeaders } from "../config/api";
 const NAV_ITEMS = [
   { id: "home", icon: Home, label: "Home" },
   { id: "meetings", icon: FileText, label: "Meetings" },
-  { id: "journal", icon: BookOpen, label: "Journal" },
   { id: "settings", icon: Settings, label: "Settings" },
 ];
 
@@ -113,7 +103,6 @@ export function DashboardLayout() {
   const [meetings, setMeetings] = useState<BackendMeeting[]>([]);
   const [meetingsLoading, setMeetingsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
-  const integrations = useIntegrations();
 
   const fetchMeetings = useCallback(async () => {
     try {
@@ -149,7 +138,6 @@ export function DashboardLayout() {
 
   const handleStopRecording = () => {
     setIsRecording(false);
-    // Refresh meetings after recording stops
     fetchMeetings();
   };
 
@@ -167,7 +155,6 @@ export function DashboardLayout() {
   if (activeView === "meeting-detail" && selectedMeetingId) {
     return (
       <div className="flex h-full">
-        {/* Sidebar stays visible */}
         <Sidebar
           activeView="meetings"
           setActiveView={(v) => { setActiveView(v); setSelectedMeetingId(null); }}
@@ -210,9 +197,8 @@ export function DashboardLayout() {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
-          {activeView === "home" && <HomeView meetings={meetings} onSelectMeeting={handleSelectMeeting} integrations={integrations} onViewAll={() => setActiveView("meetings")} />}
+          {activeView === "home" && <HomeView meetings={meetings} onSelectMeeting={handleSelectMeeting} onViewAll={() => setActiveView("meetings")} />}
           {activeView === "meetings" && <MeetingsView meetings={meetings} onSelectMeeting={handleSelectMeeting} onRefresh={fetchMeetings} initialSearch={searchQuery} />}
-          {activeView === "journal" && <JournalView />}
           {activeView === "settings" && <SettingsView />}
         </div>
       </div>
@@ -325,161 +311,19 @@ function Sidebar({
         })}
       </nav>
 
-      {/* Sidebar Footer — wired to auth */}
-      <SidebarFooter />
-    </div>
-  );
-}
-
-function SidebarFooter() {
-  const auth = useAuth();
-  const initials = auth.email
-    ? auth.email
-        .split("@")[0]
-        .split(".")
-        .map((p) => p[0]?.toUpperCase() || "")
-        .join("")
-        .slice(0, 2)
-    : "?";
-  const displayName = auth.email ? auth.email.split("@")[0] : "Not signed in";
-
-  return (
-    <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
-      <div className="flex items-center gap-2 px-1.5 group relative">
-        <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#2774AE] to-[#1a5a8e] flex items-center justify-center">
-          <span className="text-[8px] text-white">{initials}</span>
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-[10px] text-white/50 truncate">{displayName}</div>
-        </div>
-        <button
-          onClick={() => auth.logout().then(() => window.location.href = "/login")}
-          className="text-[9px] text-white/20 hover:text-red-400/60 transition-colors opacity-0 group-hover:opacity-100"
-          title="Sign out"
-        >
-          Sign out
-        </button>
-        <div className="w-1.5 h-1.5 rounded-full bg-[#6dd58c]" title="Online" />
-      </div>
-    </div>
-  );
-}
-
-/* ─── Calendar Event ─── */
-interface CalendarEvent {
-  id: string;
-  title: string;
-  start: string;
-  end: string;
-  location?: string;
-  source: "google" | "microsoft";
-}
-
-function formatEventTime(isoStr: string): string {
-  try {
-    const d = new Date(isoStr);
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const eventDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    const diffDays = Math.floor((eventDay.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-
-    const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
-    if (diffDays === 0) return `Today, ${time}`;
-    if (diffDays === 1) return `Tomorrow, ${time}`;
-    return `${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}, ${time}`;
-  } catch {
-    return isoStr;
-  }
-}
-
-function UpcomingEventsWidget({ integrations }: { integrations: ReturnType<typeof useIntegrations> }) {
-  const [events, setEvents] = useState<CalendarEvent[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  const anyConnected = integrations.status?.google?.connected || integrations.status?.microsoft?.connected;
-
-  useEffect(() => {
-    if (!anyConnected) return;
-    setLoading(true);
-    fetch(getApiUrl("/api/integrations/calendar/events?days_ahead=3"), { headers: getApiHeaders() })
-      .then((r) => r.ok ? r.json() : { events: [] })
-      .then((data) => setEvents((data.events || []).slice(0, 5)))
-      .catch(() => setEvents([]))
-      .finally(() => setLoading(false));
-  }, [anyConnected]);
-
-  if (!anyConnected) {
-    return (
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-1.5">
-            <Calendar size={11} className="text-white/25" />
-            <span className="text-[10px] text-white/30 uppercase tracking-wider">Upcoming Events</span>
-          </div>
-        </div>
-        <div className="flex items-center gap-3 p-3 rounded-lg" style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.03)" }}>
-          <div className={ICON_COL} style={{ background: "rgba(109,213,140,0.06)" }}>
-            <Plug size={13} className="text-[#6dd58c]/40" />
-          </div>
-          <div className="flex-1">
-            <div className="text-[11px] text-white/40">Connect your calendar</div>
-            <div className="text-[9px] text-white/20">Link Google or Outlook in Settings to see upcoming events</div>
-          </div>
+      {/* Footer */}
+      <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+        <div className="flex items-center gap-2 px-1.5">
+          <div className="w-1.5 h-1.5 rounded-full bg-[#6dd58c]" title="Online" />
+          <span className="text-[9px] text-white/25">NotSure v1.0</span>
         </div>
       </div>
-    );
-  }
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-1.5">
-          <Calendar size={11} className="text-white/25" />
-          <span className="text-[10px] text-white/30 uppercase tracking-wider">Upcoming Events</span>
-        </div>
-      </div>
-      {loading ? (
-        <div className="flex items-center justify-center py-4">
-          <Loader2 size={14} className="animate-spin text-white/20" />
-        </div>
-      ) : events.length === 0 ? (
-        <p className="text-[11px] text-white/25 py-3 text-center">No upcoming events in the next 3 days</p>
-      ) : (
-        <div className="space-y-1">
-          {events.map((event) => {
-            const sourceColor = event.source === "google" ? "#3b82f6" : "#0078d4";
-            const SourceIcon = event.source === "google" ? Calendar : CalendarDays;
-            return (
-              <div
-                key={event.id}
-                className="flex items-center gap-3 p-2.5 rounded-lg"
-                style={{ background: "rgba(255,255,255,0.015)" }}
-              >
-                <div className={ICON_COL} style={{ background: `${sourceColor}12` }}>
-                  <SourceIcon size={13} style={{ color: sourceColor }} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[12px] text-white/75 truncate">{event.title}</div>
-                  <div className="text-[10px] text-white/25">{formatEventTime(event.start)}</div>
-                </div>
-                <span
-                  className="text-[8px] px-1.5 py-[1px] rounded-full shrink-0"
-                  style={{ background: `${sourceColor}15`, color: sourceColor }}
-                >
-                  {event.source === "google" ? "Google" : "Outlook"}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }
 
 /* ─── Home View ─── */
-function HomeView({ meetings, onSelectMeeting, integrations, onViewAll }: { meetings: BackendMeeting[]; onSelectMeeting: (id: string) => void; integrations: ReturnType<typeof useIntegrations>; onViewAll: () => void }) {
-  // Convert backend meetings to preview format for the home view
+function HomeView({ meetings, onSelectMeeting, onViewAll }: { meetings: BackendMeeting[]; onSelectMeeting: (id: string) => void; onViewAll: () => void }) {
   const recentPreviews: MeetingPreview[] = meetings.slice(0, 5).map((m) => {
     const firstTag = m.tags?.[0] || "meeting";
     return {
@@ -492,14 +336,12 @@ function HomeView({ meetings, onSelectMeeting, integrations, onViewAll }: { meet
     };
   });
 
-  // Compute stats from real data
   const totalMeetings = meetings.length;
   const totalDuration = meetings.reduce((sum, m) => sum + (typeof m.duration === 'number' ? m.duration : 0), 0);
   const totalHours = (totalDuration / 3600).toFixed(1);
   const totalActionItems = meetings.reduce((sum, m) => sum + (m.tasks?.length || 0), 0);
   const withSummary = meetings.filter((m) => m.executive_summary).length;
 
-  // Greeting based on time of day
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
@@ -538,9 +380,6 @@ function HomeView({ meetings, onSelectMeeting, integrations, onViewAll }: { meet
           </div>
         ))}
       </div>
-
-      {/* Upcoming Events */}
-      <UpcomingEventsWidget integrations={integrations} />
 
       {/* Recent */}
       <div>

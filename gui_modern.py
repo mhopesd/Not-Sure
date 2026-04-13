@@ -60,7 +60,8 @@ class PersonalAssistantApp(ctk.CTk):
                 status_callback=self._update_status,
                 result_callback=self._handle_recording_result,
                 transcript_callback=self._update_transcript,
-                level_callback=self._update_audio_level
+                level_callback=self._update_audio_level,
+                error_callback=self._handle_error
             )
 
             self._update_loading_status("Loading AI Models...")
@@ -459,9 +460,9 @@ class PersonalAssistantApp(ctk.CTk):
         """Handle theme change from settings"""
         # Save theme preference
         if self.audio_app and hasattr(self.audio_app, 'config'):
-            if not self.audio_app.config.has_section('Settings'):
-                self.audio_app.config.add_section('Settings')
-            self.audio_app.config.set('Settings', 'theme', theme)
+            if not self.audio_app.config.has_section('SETTINGS'):
+                self.audio_app.config.add_section('SETTINGS')
+            self.audio_app.config.set('SETTINGS', 'theme', theme)
 
             config_path = getattr(self.audio_app, 'config_path', 'audio_config.ini')
             with open(config_path, 'w') as f:
@@ -478,6 +479,11 @@ class PersonalAssistantApp(ctk.CTk):
         self._show_login()
 
     # Audio callback handlers
+    def _handle_error(self, error_message):
+        """Handle error from backend (called from backend thread)"""
+        self.after(0, lambda: self._safe_update_status(f"Error: {error_message}"))
+        logging.error(f"Backend error: {error_message}")
+
     def _update_status(self, message):
         """Update status (called from backend thread)"""
         self.after(0, lambda: self._safe_update_status(message))

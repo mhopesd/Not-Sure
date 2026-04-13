@@ -8,9 +8,7 @@ import {
   Sparkles,
   Plug,
   Calendar,
-  CalendarDays,
   FileText,
-  MessageSquare,
   Zap,
   Check,
   Eye,
@@ -29,7 +27,6 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { getApiUrl, getApiHeaders } from "../config/api";
-import { useIntegrations } from "../hooks/useIntegrations";
 
 const ICON_COL = "w-8 h-8 shrink-0 rounded-lg flex items-center justify-center";
 
@@ -125,8 +122,12 @@ export function SettingsView() {
   const [saveMessage, setSaveMessage] = useState("");
   const [ollamaModel, setOllamaModel] = useState("llama3:8b");
 
-  // Integrations (wired to backend OAuth)
-  const integrations = useIntegrations();
+  // Obsidian integration
+  const [obsidianEnabled, setObsidianEnabled] = useState(false);
+  const [obsidianVaultPath, setObsidianVaultPath] = useState("");
+  const [obsidianFolder, setObsidianFolder] = useState("Meetings");
+  const [obsidianSaving, setObsidianSaving] = useState(false);
+  const [obsidianMessage, setObsidianMessage] = useState("");
 
   // Notifications
   const [meetingReminders, setMeetingReminders] = useState(true);
@@ -185,6 +186,10 @@ export function SettingsView() {
           if (data.show_in_menubar !== undefined) setMenuBarIcon(data.show_in_menubar);
           if (data.dark_mode !== undefined) setDarkMode(data.dark_mode);
           if (data.language !== undefined) setLanguage(data.language);
+          // Obsidian settings
+          if (data.obsidian_enabled !== undefined) setObsidianEnabled(data.obsidian_enabled);
+          if (data.obsidian_vault_path !== undefined) setObsidianVaultPath(data.obsidian_vault_path);
+          if (data.obsidian_folder !== undefined) setObsidianFolder(data.obsidian_folder);
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
@@ -345,7 +350,18 @@ export function SettingsView() {
             />
           )}
           {activeSection === "integrations" && (
-            <IntegrationsSection integrations={integrations} />
+            <IntegrationsSection
+              obsidianEnabled={obsidianEnabled}
+              setObsidianEnabled={setObsidianEnabled}
+              obsidianVaultPath={obsidianVaultPath}
+              setObsidianVaultPath={setObsidianVaultPath}
+              obsidianFolder={obsidianFolder}
+              setObsidianFolder={setObsidianFolder}
+              obsidianSaving={obsidianSaving}
+              setObsidianSaving={setObsidianSaving}
+              obsidianMessage={obsidianMessage}
+              setObsidianMessage={setObsidianMessage}
+            />
           )}
           {activeSection === "notifications" && (
             <NotificationsSection
@@ -595,113 +611,113 @@ function AISection({ provider, setProvider, apiKey, setApiKey, showKey, setShowK
 }
 
 /* ═══ Integrations ═══ */
-function IntegrationsSection({ integrations }: { integrations: ReturnType<typeof useIntegrations> }) {
-  const { status, loading, connecting, error } = integrations;
+function IntegrationsSection({
+  obsidianEnabled, setObsidianEnabled,
+  obsidianVaultPath, setObsidianVaultPath,
+  obsidianFolder, setObsidianFolder,
+  obsidianSaving, setObsidianSaving,
+  obsidianMessage, setObsidianMessage,
+}: {
+  obsidianEnabled: boolean; setObsidianEnabled: (v: boolean) => void;
+  obsidianVaultPath: string; setObsidianVaultPath: (v: string) => void;
+  obsidianFolder: string; setObsidianFolder: (v: string) => void;
+  obsidianSaving: boolean; setObsidianSaving: (v: boolean) => void;
+  obsidianMessage: string; setObsidianMessage: (v: string) => void;
+}) {
+  const handleSaveObsidian = async () => {
+    setObsidianSaving(true);
+    setObsidianMessage("");
+    try {
+      const res = await fetch(getApiUrl("/api/settings"), {
+        method: "PUT",
+        headers: getApiHeaders(),
+        body: JSON.stringify({
+          obsidian_enabled: obsidianEnabled,
+          obsidian_vault_path: obsidianVaultPath,
+          obsidian_folder: obsidianFolder,
+        }),
+      });
+      if (res.ok) {
+        setObsidianMessage("Obsidian settings saved!");
+        setTimeout(() => setObsidianMessage(""), 3000);
+      } else {
+        const err = await res.json();
+        setObsidianMessage(`Error: ${err.detail || "Failed to save"}`);
+      }
+    } catch {
+      setObsidianMessage("Network error: Is the API server running?");
+    } finally {
+      setObsidianSaving(false);
+    }
+  };
 
-  const googleConnected = status?.google?.connected ?? false;
-  const microsoftConnected = status?.microsoft?.connected ?? false;
-  const connectedCount = [googleConnected, microsoftConnected].filter(Boolean).length;
-
-  const wiredItems = [
-    {
-      label: "Google Calendar",
-      desc: googleConnected ? `Connected as ${status?.google?.email || "Google Account"}` : "Auto-detect meetings",
-      icon: <Calendar size={13} />,
-      color: "#3b82f6",
-      connected: googleConnected,
-      onConnect: integrations.connectGoogle,
-      onDisconnect: integrations.disconnectGoogle,
-      isConnecting: connecting === "google",
-    },
-    {
-      label: "Outlook Calendar",
-      desc: microsoftConnected ? `Connected as ${status?.microsoft?.email || "Microsoft Account"}` : "Sync from Microsoft 365",
-      icon: <CalendarDays size={13} />,
-      color: "#0078d4",
-      connected: microsoftConnected,
-      onConnect: integrations.connectMicrosoft,
-      onDisconnect: integrations.disconnectMicrosoft,
-      isConnecting: connecting === "microsoft",
-    },
-  ];
-
-  const comingSoonItems = [
-    { label: "Notion", desc: "Export summaries as pages", icon: <FileText size={13} />, color: "#ffffff" },
-    { label: "Slack", desc: "Post to channels", icon: <MessageSquare size={13} />, color: "#e01e5a" },
-    { label: "Linear", desc: "Create issues from actions", icon: <Zap size={13} />, color: "#5e6ad2" },
-  ];
+  const handleToggle = () => {
+    const next = !obsidianEnabled;
+    setObsidianEnabled(next);
+    // Auto-save the toggle
+    fetch(getApiUrl("/api/settings"), {
+      method: "PUT",
+      headers: getApiHeaders(),
+      body: JSON.stringify({ obsidian_enabled: next }),
+    }).catch(() => {});
+  };
 
   return (
     <div className="space-y-4">
-      <SectionHeader icon={<Plug size={14} />} title="Integrations" desc={loading ? "Loading..." : `${connectedCount} connected`} color="rgba(109,213,140,0.12)" />
+      <SectionHeader icon={<Plug size={14} />} title="Integrations" desc={obsidianEnabled ? "Obsidian connected" : "Not configured"} color="rgba(109,213,140,0.12)" />
 
-      {error && (
-        <div className="flex items-center gap-1.5 p-2 rounded-lg" style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.12)" }}>
-          <span className="text-[10px] text-red-400">{error}</span>
-        </div>
-      )}
+      {/* Obsidian */}
+      <div className="space-y-3">
+        <SettingRow
+          icon={<FileText size={13} className={obsidianEnabled ? "text-[#7c3aed]" : "text-white/30"} />}
+          iconBg={obsidianEnabled ? "rgba(124,58,237,0.1)" : "rgba(255,255,255,0.04)"}
+          title="Obsidian Vault"
+          desc={obsidianEnabled ? "Auto-export meeting notes to your vault" : "Enable to sync meetings as Markdown notes"}
+          right={<Toggle enabled={obsidianEnabled} onToggle={handleToggle} />}
+        />
 
-      {loading ? (
-        <div className="flex items-center justify-center py-6">
-          <Loader2 size={16} className="animate-spin text-white/20" />
-        </div>
-      ) : (
-        <div className="space-y-1.5">
-          {/* Wired: Google & Microsoft */}
-          {wiredItems.map((item) => (
-            <SettingRow
-              key={item.label}
-              icon={<span style={{ color: item.color }}>{item.icon}</span>}
-              iconBg={`${item.color}12`}
-              title={item.label}
-              desc={item.desc}
-              right={
-                item.connected ? (
-                  <button
-                    onClick={item.onDisconnect}
-                    className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] transition-all hover:opacity-80"
-                    style={{ background: `${item.color}15`, color: item.color, border: `1px solid ${item.color}25` }}
-                  >
-                    <Check size={9} /> Connected
-                  </button>
-                ) : (
-                  <button
-                    onClick={item.onConnect}
-                    disabled={item.isConnecting}
-                    className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] transition-all disabled:opacity-40"
-                    style={{ background: "rgba(255,255,255,0.03)", color: "rgba(255,255,255,0.3)", border: "1px solid rgba(255,255,255,0.05)" }}
-                  >
-                    {item.isConnecting ? (
-                      <><Loader2 size={9} className="animate-spin" /> Connecting...</>
-                    ) : (
-                      <><Plug size={9} /> Connect</>
-                    )}
-                  </button>
-                )
-              }
-            />
-          ))}
-
-          {/* Coming Soon: Notion, Slack, Linear */}
-          {comingSoonItems.map((item) => (
-            <SettingRow
-              key={item.label}
-              icon={<span style={{ color: item.color, opacity: 0.35 }}>{item.icon}</span>}
-              iconBg="rgba(255,255,255,0.02)"
-              title={item.label}
-              desc={item.desc}
-              right={
-                <span
-                  className="text-[9px] text-white/20 px-2 py-1 rounded-md"
-                  style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)" }}
-                >
-                  Coming Soon
+        {obsidianEnabled && (
+          <div className="space-y-2 pl-11">
+            <div>
+              <label className="text-[10px] text-white/30 block mb-1">Vault Path</label>
+              <input
+                type="text"
+                value={obsidianVaultPath}
+                onChange={(e) => setObsidianVaultPath(e.target.value)}
+                placeholder="~/Library/Mobile Documents/iCloud~md~obsidian/Documents/MyVault"
+                className="w-full text-[11px] text-white/70 bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 outline-none focus:border-[#7c3aed]/30 transition-colors placeholder:text-white/15"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-white/30 block mb-1">Folder Name</label>
+              <input
+                type="text"
+                value={obsidianFolder}
+                onChange={(e) => setObsidianFolder(e.target.value)}
+                placeholder="Meetings"
+                className="w-full text-[11px] text-white/70 bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 outline-none focus:border-[#7c3aed]/30 transition-colors placeholder:text-white/15"
+              />
+              <p className="text-[9px] text-white/15 mt-1">Notes will be saved to: {obsidianVaultPath}/{obsidianFolder}/</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSaveObsidian}
+                disabled={obsidianSaving || !obsidianVaultPath.trim()}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-medium transition-all disabled:opacity-40"
+                style={{ background: "rgba(124,58,237,0.15)", color: "#7c3aed", border: "1px solid rgba(124,58,237,0.2)" }}
+              >
+                {obsidianSaving ? <><Loader2 size={10} className="animate-spin" /> Saving...</> : <><Check size={10} /> Save</>}
+              </button>
+              {obsidianMessage && (
+                <span className={`text-[10px] ${obsidianMessage.startsWith("Error") ? "text-red-400" : "text-[#6dd58c]"}`}>
+                  {obsidianMessage}
                 </span>
-              }
-            />
-          ))}
-        </div>
-      )}
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
     </div>
   );
 }

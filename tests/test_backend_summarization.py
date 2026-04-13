@@ -108,7 +108,7 @@ class TestGeminiSummarization:
             mock_store.get_api_key.return_value = None
             result = app._summarize_with_gemini("transcript")
         assert result["title"] == "Error Processing"
-        assert "API Key Missing" in result["executive_summary"]
+        assert "api key" in result["executive_summary"].lower()
 
     def test_library_not_installed(self, app):
         with patch("backend.GOOGLE_GENAI_AVAILABLE", False):

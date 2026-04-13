@@ -234,7 +234,7 @@ class SettingsView(ctk.CTkFrame):
                 key = config.get('API', 'gemini_api_key', fallback='')
                 has_key = bool(key)
         if has_key:
-            self.api_key_entry.input.insert(0, "••••••••••••••••")
+            self.api_key_entry.insert(0, "••••••••••••••••")
 
         save_key_btn = PrimaryButton(
             key_input_row,
@@ -607,7 +607,7 @@ class SettingsView(ctk.CTkFrame):
 
             # Mask the key
             self.api_key_entry.input.delete(0, "end")
-            self.api_key_entry.input.insert(0, "••••••••••••••••")
+            self.api_key_entry.insert(0, "••••••••••••••••")
 
         self._update_api_status()
 

@@ -6,16 +6,15 @@ as REST and WebSocket endpoints for the React frontend.
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List
 import asyncio
-import html as html_lib
 import json
 import os
-import secrets
 import time
 from datetime import datetime
 import threading
@@ -25,18 +24,110 @@ import requests as http_requests  # renamed to avoid clash with FastAPI Request
 # Import the existing backend
 from backend import EnhancedAudioApp
 
-# Import integrations
-from integrations import OAuthManager, MicrosoftIntegration, GoogleIntegration
-
 # Secure credential storage
 from secure_store import secure_store
 
 logger = logging.getLogger(__name__)
 
+# --- Lifespan must be defined before FastAPI() so it can be passed to the constructor ---
+
+# Global state
+backend_app = None
+_event_loop = None
+active_websockets = set()
+
+async def broadcast_status(message: str):
+    """Send status updates to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "status", "message": message})
+        except Exception:
+            pass
+
+async def broadcast_transcript(text: str):
+    """Send live transcript updates to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "transcript_update", "text": text})
+        except Exception:
+            pass
+
+async def broadcast_level(level: float):
+    """Send audio level updates to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "audio_level", "value": level})
+        except Exception:
+            pass
+
+async def broadcast_live_summary(data: dict):
+    """Send live summary updates to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "live_summary", "data": data})
+        except Exception:
+            pass
+
+async def broadcast_completion():
+    """Send recording-complete event to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "status", "status": "complete"})
+        except Exception:
+            pass
+
+async def broadcast_error(error_message: str):
+    """Send processing-error event to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({"type": "status", "status": "error", "error": error_message})
+        except Exception:
+            pass
+
+def status_callback(message: str):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_status(message), _event_loop)
+
+def transcript_callback(text: str):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_transcript(text), _event_loop)
+
+def level_callback(level: float):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_level(level), _event_loop)
+
+def live_summary_callback(data: dict):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_live_summary(data), _event_loop)
+
+def result_callback(summary_data):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_completion(), _event_loop)
+
+def error_callback(error_message: str):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_error(error_message), _event_loop)
+
+@asynccontextmanager
+async def lifespan(app):
+    """Initialize the backend on server start"""
+    global backend_app, _event_loop
+    _event_loop = asyncio.get_running_loop()
+    backend_app = EnhancedAudioApp()
+    backend_app.status_callback = status_callback
+    backend_app.result_callback = result_callback
+    backend_app.error_callback = error_callback
+    backend_app.transcript_callback = transcript_callback
+    backend_app.level_callback = level_callback
+    backend_app.summary_callback = live_summary_callback
+    print("✓ Backend initialized")
+    yield
+
 app = FastAPI(
     title="Audio Summary API",
     description="Local API for audio recording, transcription, and AI summarization",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS for frontend
@@ -47,16 +138,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global backend instance
-backend_app: Optional[EnhancedAudioApp] = None
-active_websockets: List[WebSocket] = []
-oauth_manager: Optional[OAuthManager] = None
-_event_loop: Optional[asyncio.AbstractEventLoop] = None
-
-# OAuth CSRF state store: {state_token: expiry_timestamp}
-_oauth_states: dict[str, float] = {}
-_OAUTH_STATE_TTL = 600  # 10 minutes
 
 def parse_duration_to_seconds(duration_val) -> int:
     """Convert duration string like '5m 23s' or '24s' or int to seconds."""
@@ -124,110 +205,22 @@ class SettingsUpdate(BaseModel):
     show_in_menubar: Optional[bool] = None
     dark_mode: Optional[bool] = None
     language: Optional[str] = None
-
-class LoginRequest(BaseModel):
-    provider: str  # "google" or "microsoft"
+    obsidian_enabled: Optional[bool] = None
+    obsidian_vault_path: Optional[str] = None
+    obsidian_folder: Optional[str] = None
 
 class PermissionRequest(BaseModel):
     permission: str  # "microphone", "screen_recording", etc.
 
-# Status callback for WebSocket updates
-async def broadcast_status(message: str):
-    """Send status updates to all connected WebSocket clients"""
-    for ws in active_websockets:
-        try:
-            await ws.send_json({"type": "status", "message": message})
-        except Exception:
-            pass
 
-async def broadcast_transcript(text: str):
-    """Send live transcript updates to all connected WebSocket clients"""
-    for ws in active_websockets:
-        try:
-            await ws.send_json({"type": "transcript_update", "text": text})
-        except Exception:
-            pass
-
-async def broadcast_level(level: float):
-    """Send audio level updates to all connected WebSocket clients"""
-    for ws in active_websockets:
-        try:
-            await ws.send_json({"type": "audio_level", "value": level})
-        except Exception:
-            pass
-
-async def broadcast_live_summary(data: dict):
-    """Send live summary updates to all connected WebSocket clients"""
-    for ws in active_websockets:
-        try:
-            await ws.send_json({"type": "live_summary", "data": data})
-        except Exception:
-            pass
-
-async def broadcast_completion():
-    """Send recording-complete event to all connected WebSocket clients"""
-    for ws in active_websockets:
-        try:
-            await ws.send_json({"type": "status", "status": "complete"})
-        except Exception:
-            pass
-
-async def broadcast_error(error_message: str):
-    """Send processing-error event to all connected WebSocket clients"""
-    for ws in active_websockets:
-        try:
-            await ws.send_json({"type": "status", "status": "error", "error": error_message})
-        except Exception:
-            pass
-
-# Thread-safe callback wrappers — these are called from backend threads,
-# so we must use run_coroutine_threadsafe to schedule onto the event loop.
-def status_callback(message: str):
-    if _event_loop:
-        asyncio.run_coroutine_threadsafe(broadcast_status(message), _event_loop)
-
-def transcript_callback(text: str):
-    if _event_loop:
-        asyncio.run_coroutine_threadsafe(broadcast_transcript(text), _event_loop)
-
-def level_callback(level: float):
-    if _event_loop:
-        asyncio.run_coroutine_threadsafe(broadcast_level(level), _event_loop)
-
-def live_summary_callback(data: dict):
-    if _event_loop:
-        asyncio.run_coroutine_threadsafe(broadcast_live_summary(data), _event_loop)
-
-def result_callback(summary_data):
-    if _event_loop:
-        asyncio.run_coroutine_threadsafe(broadcast_completion(), _event_loop)
-
-def error_callback(error_message: str):
-    if _event_loop:
-        asyncio.run_coroutine_threadsafe(broadcast_error(error_message), _event_loop)
-
-@asynccontextmanager
-async def lifespan(app):
-    """Initialize the backend on server start"""
-    global backend_app, oauth_manager, _event_loop
-    _event_loop = asyncio.get_running_loop()
-    backend_app = EnhancedAudioApp()
-    backend_app.status_callback = status_callback
-    backend_app.result_callback = result_callback
-    backend_app.error_callback = error_callback
-    backend_app.transcript_callback = transcript_callback
-    backend_app.level_callback = level_callback
-    backend_app.summary_callback = live_summary_callback
-    oauth_manager = OAuthManager()
-    print("✓ Backend initialized")
-    print("✓ OAuth manager initialized")
-    yield
-
-# Wire lifespan after definition (app is created earlier for route decorators)
-app.router.lifespan_context = lifespan
+# Serve React frontend from figma-ui/dist (if available)
+_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figma-ui", "dist")
+_FRONTEND_AVAILABLE = os.path.isdir(_FRONTEND_DIR) and os.path.isfile(os.path.join(_FRONTEND_DIR, "index.html"))
 
 @app.get("/")
 async def root():
+    if _FRONTEND_AVAILABLE:
+        return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
     return {"status": "ok", "message": "Audio Summary API is running"}
 
 @app.get("/api/health")
@@ -237,85 +230,6 @@ async def health_check():
         "backend_ready": backend_app is not None,
         "model_loaded": backend_app.whisper_model is not None if backend_app else False
     }
-
-# ==================== AUTH MIDDLEWARE ====================
-
-# Routes that don't require authentication
-AUTH_EXEMPT_ROUTES = {
-    "/", "/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/logout",
-    "/api/integrations/google/auth", "/api/integrations/google/callback",
-    "/api/integrations/microsoft/auth", "/api/integrations/microsoft/callback",
-    "/ws",
-}
-
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    """Require login for all API routes except auth and health endpoints."""
-    path = request.url.path
-    if path in AUTH_EXEMPT_ROUTES or not path.startswith("/api/"):
-        return await call_next(request)
-    if backend_app and not backend_app.is_logged_in():
-        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
-    return await call_next(request)
-
-# ==================== AUTH ====================
-
-@app.get("/api/auth/status")
-async def auth_status():
-    """Check current login state."""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    logged_in = backend_app.is_logged_in()
-    user_info = backend_app.get_user_info() if logged_in else {}
-    onboarding = backend_app.session.get("onboarding_completed", False) if logged_in else False
-    return {
-        "logged_in": logged_in,
-        "email": user_info.get("email", ""),
-        "provider": user_info.get("provider", ""),
-        "onboarding_completed": onboarding,
-    }
-
-@app.post("/api/auth/login")
-async def auth_login(request: LoginRequest):
-    """Log in after OAuth completes. Reads email from saved OAuth tokens."""
-    if not backend_app or not oauth_manager:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    provider = request.provider
-    if provider not in ("google", "microsoft"):
-        raise HTTPException(status_code=400, detail="Provider must be 'google' or 'microsoft'")
-    tokens = oauth_manager.load_tokens(provider)
-    if not tokens:
-        raise HTTPException(status_code=400, detail=f"No OAuth tokens found for {provider}. Connect first.")
-    email = tokens.get("email", f"user@{provider}.com")
-    backend_app.login(provider, email)
-    return {"success": True, "email": email, "provider": provider}
-
-@app.post("/api/auth/logout")
-async def auth_logout():
-    """Log out the current user."""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    backend_app.logout()
-    return {"success": True}
-
-# ==================== ONBOARDING ====================
-
-@app.get("/api/onboarding/status")
-async def onboarding_status():
-    """Check if onboarding has been completed."""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    completed = backend_app.session.get("onboarding_completed", False)
-    return {"completed": completed}
-
-@app.post("/api/onboarding/complete")
-async def onboarding_complete():
-    """Mark onboarding as completed."""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    backend_app.session["onboarding_completed"] = True
-    backend_app.save_session()
-    return {"success": True}
 
 # ==================== PERMISSIONS ====================
 
@@ -745,60 +659,6 @@ async def get_people():
     
     return {"people": list(people_map.values())}
 
-# ==================== JOURNAL ====================
-
-class JournalEntry(BaseModel):
-    entry: str
-
-@app.get("/api/journal")
-async def get_journal_entries():
-    """Get all journal entries"""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    entries = backend_app.get_journal_entries()
-    return {"entries": entries}
-
-@app.post("/api/journal")
-async def create_journal_entry(journal: JournalEntry):
-    """Create a new journal entry"""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    entry = backend_app.create_journal_entry(journal.entry)
-    return {"journalEntry": entry}
-
-@app.put("/api/journal/{entry_id}/optimize")
-async def optimize_journal_entry(entry_id: str):
-    """Optimize a journal entry with AI suggestions"""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    suggestions = backend_app.optimize_journal_entry(entry_id)
-    return {
-        "journalEntry": {
-            "id": entry_id,
-            "suggestions": suggestions
-        }
-    }
-
-class JournalUpdate(BaseModel):
-    content: Optional[str] = None
-    tags: Optional[List[str]] = None
-
-@app.put("/api/journal/{entry_id}")
-async def update_journal_entry(entry_id: str, update: JournalUpdate):
-    """Update a journal entry's content or tags."""
-    if not backend_app:
-        raise HTTPException(status_code=503, detail="Backend not initialized")
-    entries = backend_app.get_journal_entries()
-    for entry in entries:
-        if entry.get("id") == entry_id:
-            if update.content is not None:
-                entry["content"] = update.content
-            if update.tags is not None:
-                entry["tags"] = update.tags
-            backend_app.save_journal()
-            return {"journalEntry": entry}
-    raise HTTPException(status_code=404, detail="Journal entry not found")
-
 # ==================== STORAGE ====================
 
 @app.get("/api/storage/usage")
@@ -921,6 +781,18 @@ async def get_settings():
     except Exception:
         pass
 
+    # Obsidian settings
+    obsidian_enabled = False
+    obsidian_vault_path = ""
+    obsidian_folder = "Meetings"
+    try:
+        if config.has_section("OBSIDIAN"):
+            obsidian_enabled = config.getboolean("OBSIDIAN", "enabled", fallback=False)
+            obsidian_vault_path = config.get("OBSIDIAN", "vault_path", fallback="")
+            obsidian_folder = config.get("OBSIDIAN", "folder", fallback="Meetings")
+    except Exception:
+        pass
+
     return {
         "llm_provider": llm_provider,
         "gemini_model": "gemini-2.0-flash-exp",
@@ -933,6 +805,9 @@ async def get_settings():
         "show_in_menubar": show_in_menubar,
         "dark_mode": dark_mode,
         "language": language,
+        "obsidian_enabled": obsidian_enabled,
+        "obsidian_vault_path": obsidian_vault_path,
+        "obsidian_folder": obsidian_folder,
     }
 
 @app.put("/api/settings")
@@ -979,6 +854,17 @@ async def update_settings(settings: SettingsUpdate):
         if settings.language is not None:
             config.set("PREFERENCES", "language", settings.language)
 
+    # Obsidian settings
+    if any(v is not None for v in [settings.obsidian_enabled, settings.obsidian_vault_path, settings.obsidian_folder]):
+        if not config.has_section("OBSIDIAN"):
+            config.add_section("OBSIDIAN")
+        if settings.obsidian_enabled is not None:
+            config.set("OBSIDIAN", "enabled", str(settings.obsidian_enabled))
+        if settings.obsidian_vault_path is not None:
+            config.set("OBSIDIAN", "vault_path", settings.obsidian_vault_path)
+        if settings.obsidian_folder is not None:
+            config.set("OBSIDIAN", "folder", settings.obsidian_folder)
+
     with open(config_path, "w") as f:
         config.write(f)
 
@@ -987,393 +873,7 @@ async def update_settings(settings: SettingsUpdate):
 
     return {"success": True, "message": "Settings updated"}
 
-# ==================== INTEGRATIONS ====================
 
-MICROSOFT_REDIRECT_URI = "http://localhost:8000/api/integrations/microsoft/callback"
-GOOGLE_REDIRECT_URI = "http://localhost:8000/api/integrations/google/callback"
-
-
-class IntegrationCredentials(BaseModel):
-    provider: str  # "microsoft" or "google"
-    client_id: str
-    client_secret: str
-
-
-class CalendarEventCreate(BaseModel):
-    provider: str  # "microsoft" or "google"
-    title: str
-    start: str  # ISO 8601
-    end: str    # ISO 8601
-    description: str = ""
-    location: str = ""
-
-
-class EmailSend(BaseModel):
-    provider: str  # "microsoft" or "google"
-    to: str
-    subject: str
-    body_html: str
-
-
-def _ensure_valid_token(provider: str) -> str:
-    """Get a valid access token, refreshing if expired. Returns the access token."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-
-    tokens = oauth_manager.load_tokens(provider)
-    if not tokens:
-        raise HTTPException(status_code=401, detail=f"Not connected to {provider}")
-
-    # Check if token needs refresh
-    if oauth_manager.is_token_expired(provider):
-        refresh_token = tokens.get("refresh_token")
-        if not refresh_token:
-            oauth_manager.clear_tokens(provider)
-            raise HTTPException(status_code=401, detail=f"{provider} token expired, please reconnect")
-
-        creds = oauth_manager.get_credentials(provider)
-        if not creds:
-            raise HTTPException(status_code=400, detail=f"No credentials for {provider}")
-
-        try:
-            if provider == "microsoft":
-                new_tokens = MicrosoftIntegration.refresh_tokens(
-                    refresh_token, creds["client_id"], creds["client_secret"]
-                )
-            else:
-                new_tokens = GoogleIntegration.refresh_tokens(
-                    refresh_token, creds["client_id"], creds["client_secret"]
-                )
-            # Preserve email/display_name from old tokens
-            new_tokens["email"] = tokens.get("email", "")
-            new_tokens["display_name"] = tokens.get("display_name", "")
-            oauth_manager.save_tokens(provider, new_tokens)
-            return new_tokens["access_token"]
-        except Exception as e:
-            logger.error("Token refresh failed for %s: %s", provider, e)
-            oauth_manager.clear_tokens(provider)
-            raise HTTPException(status_code=401, detail=f"Token refresh failed, please reconnect")
-
-    return tokens["access_token"]
-
-
-# Allowed origins for postMessage (prevents cross-origin eavesdropping)
-_POST_MESSAGE_ORIGIN = "http://localhost:5173"
-
-# HTML page returned after OAuth callback — closes popup and notifies parent
-_OAUTH_SUCCESS_HTML = """
-<!DOCTYPE html>
-<html>
-<head><title>Connected!</title></head>
-<body style="font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f0fdf4;">
-  <div style="text-align: center; padding: 2rem;">
-    <div style="font-size: 3rem; margin-bottom: 1rem;">✅</div>
-    <h2 style="color: #16a34a;">Successfully Connected!</h2>
-    <p style="color: #6b7280;">You can close this window.</p>
-  </div>
-  <script>
-    if (window.opener) {
-      window.opener.postMessage({ type: 'oauth_success', provider: '%PROVIDER%' }, '%ORIGIN%');
-    }
-    setTimeout(() => window.close(), 2000);
-  </script>
-</body>
-</html>
-"""
-
-_OAUTH_ERROR_HTML = """
-<!DOCTYPE html>
-<html>
-<head><title>Connection Failed</title></head>
-<body style="font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #fef2f2;">
-  <div style="text-align: center; padding: 2rem;">
-    <div style="font-size: 3rem; margin-bottom: 1rem;">❌</div>
-    <h2 style="color: #dc2626;">Connection Failed</h2>
-    <p style="color: #6b7280;">%ERROR%</p>
-  </div>
-  <script>
-    if (window.opener) {
-      window.opener.postMessage({ type: 'oauth_error', provider: '%PROVIDER%', error: '%ERROR%' }, '%ORIGIN%');
-    }
-    setTimeout(() => window.close(), 5000);
-  </script>
-</body>
-</html>
-"""
-
-
-def _generate_oauth_state(provider: str) -> str:
-    """Generate a cryptographically random state token for OAuth CSRF protection."""
-    # Clean up expired states
-    now = time.time()
-    expired = [k for k, v in _oauth_states.items() if v < now]
-    for k in expired:
-        del _oauth_states[k]
-
-    state = secrets.token_urlsafe(32)
-    _oauth_states[state] = now + _OAUTH_STATE_TTL
-    return state
-
-
-def _validate_oauth_state(state: str | None) -> bool:
-    """Validate and consume an OAuth state token. Returns True if valid."""
-    if not state or state not in _oauth_states:
-        return False
-    expiry = _oauth_states.pop(state)
-    return time.time() < expiry
-
-
-def _render_oauth_success(provider: str) -> HTMLResponse:
-    """Render OAuth success HTML with safe values."""
-    html = (_OAUTH_SUCCESS_HTML
-            .replace("%PROVIDER%", html_lib.escape(provider))
-            .replace("%ORIGIN%", _POST_MESSAGE_ORIGIN))
-    return HTMLResponse(content=html)
-
-
-def _render_oauth_error(provider: str, error: str) -> HTMLResponse:
-    """Render OAuth error HTML with HTML-escaped error message (prevents XSS)."""
-    safe_error = html_lib.escape(str(error))
-    html = (_OAUTH_ERROR_HTML
-            .replace("%PROVIDER%", html_lib.escape(provider))
-            .replace("%ERROR%", safe_error)
-            .replace("%ORIGIN%", _POST_MESSAGE_ORIGIN))
-    return HTMLResponse(content=html)
-
-
-@app.put("/api/integrations/credentials")
-async def save_integration_credentials(creds: IntegrationCredentials):
-    """Save OAuth client credentials for a provider."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-    if creds.provider not in OAuthManager.PROVIDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {creds.provider}")
-
-    oauth_manager.save_credentials(creds.provider, creds.client_id, creds.client_secret)
-    return {"success": True, "message": f"Credentials saved for {creds.provider}"}
-
-
-@app.get("/api/integrations/status")
-async def get_integration_status():
-    """Get connection status for all integration providers."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-    return oauth_manager.get_all_status()
-
-
-# ── Microsoft OAuth ────────────────────────────────────────────────
-
-@app.get("/api/integrations/microsoft/auth")
-async def microsoft_auth():
-    """Generate Microsoft OAuth authorization URL."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-
-    creds = oauth_manager.get_credentials("microsoft")
-    if not creds:
-        raise HTTPException(
-            status_code=400,
-            detail="Microsoft credentials not configured. Please save your Client ID and Secret first."
-        )
-
-    state = _generate_oauth_state("microsoft")
-    auth_url = MicrosoftIntegration.get_auth_url(
-        client_id=creds["client_id"],
-        redirect_uri=MICROSOFT_REDIRECT_URI,
-        state=state,
-    )
-    return {"auth_url": auth_url}
-
-
-@app.get("/api/integrations/microsoft/callback")
-async def microsoft_callback(code: str = None, error: str = None, state: str = None):
-    """Handle Microsoft OAuth callback — exchanges code for tokens."""
-    if error:
-        return _render_oauth_error("microsoft", error)
-
-    if not code:
-        return _render_oauth_error("microsoft", "No authorization code received")
-
-    if not _validate_oauth_state(state):
-        return _render_oauth_error("microsoft", "Invalid or expired state — possible CSRF attack. Please try again.")
-
-    try:
-        creds = oauth_manager.get_credentials("microsoft")
-        if not creds:
-            raise ValueError("Microsoft credentials not configured")
-
-        token_data = MicrosoftIntegration.exchange_code(
-            code=code,
-            client_id=creds["client_id"],
-            client_secret=creds["client_secret"],
-            redirect_uri=MICROSOFT_REDIRECT_URI,
-        )
-        oauth_manager.save_tokens("microsoft", token_data)
-        logger.info("Microsoft OAuth completed for %s", token_data.get("email"))
-
-        return _render_oauth_success("microsoft")
-    except Exception as e:
-        logger.error("Microsoft OAuth error: %s", e)
-        return _render_oauth_error("microsoft", str(e))
-
-
-@app.delete("/api/integrations/microsoft/disconnect")
-async def microsoft_disconnect():
-    """Disconnect Microsoft integration."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-    oauth_manager.clear_tokens("microsoft")
-    return {"success": True, "message": "Microsoft disconnected"}
-
-
-# ── Google OAuth ───────────────────────────────────────────────────
-
-@app.get("/api/integrations/google/auth")
-async def google_auth():
-    """Generate Google OAuth authorization URL."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-
-    creds = oauth_manager.get_credentials("google")
-    if not creds:
-        raise HTTPException(
-            status_code=400,
-            detail="Google credentials not configured. Please save your Client ID and Secret first."
-        )
-
-    state = _generate_oauth_state("google")
-    auth_url = GoogleIntegration.get_auth_url(
-        client_id=creds["client_id"],
-        redirect_uri=GOOGLE_REDIRECT_URI,
-        state=state,
-    )
-    return {"auth_url": auth_url}
-
-
-@app.get("/api/integrations/google/callback")
-async def google_callback(code: str = None, error: str = None, state: str = None):
-    """Handle Google OAuth callback — exchanges code for tokens."""
-    if error:
-        return _render_oauth_error("google", error)
-
-    if not code:
-        return _render_oauth_error("google", "No authorization code received")
-
-    if not _validate_oauth_state(state):
-        return _render_oauth_error("google", "Invalid or expired state — possible CSRF attack. Please try again.")
-
-    try:
-        creds = oauth_manager.get_credentials("google")
-        if not creds:
-            raise ValueError("Google credentials not configured")
-
-        token_data = GoogleIntegration.exchange_code(
-            code=code,
-            client_id=creds["client_id"],
-            client_secret=creds["client_secret"],
-            redirect_uri=GOOGLE_REDIRECT_URI,
-        )
-        oauth_manager.save_tokens("google", token_data)
-        logger.info("Google OAuth completed for %s", token_data.get("email"))
-
-        return _render_oauth_success("google")
-    except Exception as e:
-        logger.error("Google OAuth error: %s", e)
-        return _render_oauth_error("google", str(e))
-
-
-@app.delete("/api/integrations/google/disconnect")
-async def google_disconnect():
-    """Disconnect Google integration."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-    oauth_manager.clear_tokens("google")
-    return {"success": True, "message": "Google disconnected"}
-
-
-# ── Calendar & Email (unified) ─────────────────────────────────────
-
-@app.get("/api/integrations/calendar/events")
-async def get_calendar_events(days_ahead: int = 7):
-    """Get calendar events from all connected providers."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-
-    all_events = []
-
-    # Microsoft Calendar
-    if oauth_manager.is_connected("microsoft"):
-        try:
-            access_token = _ensure_valid_token("microsoft")
-            events = MicrosoftIntegration.get_calendar_events(access_token, days_ahead)
-            all_events.extend(events)
-        except Exception as e:
-            logger.warning("Failed to fetch Microsoft calendar: %s", e)
-
-    # Google Calendar
-    if oauth_manager.is_connected("google"):
-        try:
-            access_token = _ensure_valid_token("google")
-            events = GoogleIntegration.get_calendar_events(access_token, days_ahead)
-            all_events.extend(events)
-        except Exception as e:
-            logger.warning("Failed to fetch Google calendar: %s", e)
-
-    # Sort all events by start time
-    all_events.sort(key=lambda e: e.get("start", ""))
-    return {"events": all_events}
-
-
-@app.post("/api/integrations/calendar/events")
-async def create_calendar_event(event: CalendarEventCreate):
-    """Create a calendar event on a connected provider."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-    if event.provider not in OAuthManager.PROVIDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {event.provider}")
-
-    access_token = _ensure_valid_token(event.provider)
-
-    try:
-        if event.provider == "microsoft":
-            result = MicrosoftIntegration.create_calendar_event(
-                access_token, event.title, event.start, event.end,
-                body=event.description, location=event.location,
-            )
-        else:
-            result = GoogleIntegration.create_calendar_event(
-                access_token, event.title, event.start, event.end,
-                description=event.description, location=event.location,
-            )
-        return {"success": True, "event": result}
-    except Exception as e:
-        logger.error("Failed to create calendar event: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/integrations/email/send")
-async def send_email(email: EmailSend):
-    """Send an email via a connected provider (meeting summary sharing)."""
-    if not oauth_manager:
-        raise HTTPException(status_code=503, detail="OAuth manager not initialized")
-    if email.provider not in OAuthManager.PROVIDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {email.provider}")
-
-    access_token = _ensure_valid_token(email.provider)
-
-    try:
-        if email.provider == "microsoft":
-            MicrosoftIntegration.send_email(
-                access_token, email.to, email.subject, email.body_html,
-            )
-        else:
-            GoogleIntegration.send_email(
-                access_token, email.to, email.subject, email.body_html,
-            )
-        return {"success": True, "message": f"Email sent via {email.provider}"}
-    except Exception as e:
-        logger.error("Failed to send email: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== WEBSOCKET ====================
 
@@ -1400,10 +900,38 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in active_websockets:
             active_websockets.remove(websocket)
 
+# ==================== STATIC FILES + SPA FALLBACK ====================
+
+# Mount static assets from the React build (JS, CSS, images)
+if _FRONTEND_AVAILABLE:
+    _ASSETS_DIR = os.path.join(_FRONTEND_DIR, "assets")
+    if os.path.isdir(_ASSETS_DIR):
+        app.mount("/assets", StaticFiles(directory=_ASSETS_DIR), name="frontend-assets")
+
+    # SPA catch-all: any route not matched by API returns index.html
+    # so React Router can handle client-side routing
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # Don't intercept API routes or WebSocket
+        if full_path.startswith("api/") or full_path == "ws":
+            raise HTTPException(status_code=404)
+        # Try to serve static file first
+        file_path = os.path.join(_FRONTEND_DIR, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
+        # Fall back to index.html for SPA routing
+        return FileResponse(os.path.join(_FRONTEND_DIR, "index.html"))
+
+
 # ==================== MAIN ====================
 
 if __name__ == "__main__":
     import uvicorn
     print("Starting Audio Summary API server...")
-    print("Frontend should connect to: http://localhost:8000")
+    if _FRONTEND_AVAILABLE:
+        print(f"Frontend: http://localhost:8000  (serving from {_FRONTEND_DIR})")
+    else:
+        print("Frontend not found — API-only mode")
+        print("To enable frontend, build figma-ui: cd figma-ui && npm run build")
+    print("API docs: http://localhost:8000/docs")
     uvicorn.run(app, host="127.0.0.1", port=8000)
