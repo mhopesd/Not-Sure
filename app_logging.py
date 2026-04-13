@@ -17,7 +17,21 @@ Usage:
 import logging
 import logging.handlers
 import os
+import sys
 from datetime import datetime
+
+
+class _SafeStreamHandler(logging.StreamHandler):
+    """StreamHandler that silently ignores writes to closed streams."""
+
+    def emit(self, record):
+        try:
+            if self.stream and not self.stream.closed:
+                super().emit(record)
+        except (ValueError, OSError):
+            # Stream was closed between the check and the write — ignore.
+            pass
+
 
 # Create logger instance
 logger = logging.getLogger("AudioSummaryApp")
@@ -75,10 +89,11 @@ def setup_logging(
     except Exception as e:
         print(f"Warning: Could not create file handler: {e}")
 
-    # Console handler (optional)
+    # Console handler (optional) — uses _SafeStreamHandler to avoid
+    # "I/O operation on closed file" errors from background threads.
     if console_output:
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)  # Less verbose on console
+        console_handler = _SafeStreamHandler()
+        console_handler.setLevel(logging.INFO)
         console_formatter = logging.Formatter(
             '%(levelname)s - %(message)s'
         )

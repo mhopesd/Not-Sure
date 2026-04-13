@@ -73,7 +73,7 @@ class EnhancedAudioApp:
         self.config_file = "audio_config.ini"
         self.history_file = "audio_history.json"
         self.history_directory = os.path.expanduser("~/Documents/Audio Recordings")
-        
+
         self.config = configparser.ConfigParser()
         self.load_config()
         
@@ -236,6 +236,21 @@ class EnhancedAudioApp:
             self.auto_detect_llm()
         except Exception as e:
             logger.error(f"Config warning: {e}")
+
+        # Ensure the recordings directory exists (after config has finalised the path)
+        try:
+            os.makedirs(self.history_directory, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Could not create history directory '{self.history_directory}': {e}")
+            # Fall back to a guaranteed-writable directory
+            fallback = os.path.join(os.path.expanduser("~"), "Documents", "Audio Recordings")
+            try:
+                os.makedirs(fallback, exist_ok=True)
+                self.history_directory = fallback
+                logger.info(f"Fell back to history directory: {fallback}")
+            except OSError:
+                self.history_directory = os.path.expanduser("~")
+                logger.warning(f"Using home directory as fallback for recordings")
 
     def auto_detect_llm(self):
         llm_priority = ['openai', 'gemini', 'anthropic', 'ollama']
@@ -447,9 +462,14 @@ class EnhancedAudioApp:
             if self.recording_mode == 'hybrid': device = self.hybrid_device
             elif self.recording_mode == 'system': device = self.blackhole_device
             else: device = self.microphone_device
-            
-            device_index = device['index'] if device else None
-            
+
+            if not device:
+                self.update_status(f"Error: No audio device found for '{self.recording_mode}' mode")
+                logger.error(f"No audio device available for recording mode: {self.recording_mode}")
+                return
+
+            device_index = device['index']
+
             with sd.InputStream(samplerate=SAMPLE_RATE, device=device_index,
                                 channels=1, callback=audio_callback, dtype='int16'):
                 
@@ -1172,7 +1192,7 @@ Rules:
         if not GOOGLE_GENAI_AVAILABLE: return self.error_summary("Google GenAI Lib Missing", transcript)
 
         key = self._get_api_key('gemini')
-        if not key: return self.error_summary("Gemini API Key Missing", transcript)
+        if not key: return self.error_summary("Gemini API key not set. Add it in Settings > API Keys or in audio_config.ini under [API_KEYS] gemini = YOUR_KEY", transcript)
 
         logger.info("Sending request to Gemini API (V1 SDK)...")
         try:
@@ -1259,8 +1279,10 @@ Rules:
             logger.info("Received response from Gemini.")
             
             text = response.text.strip()
-            if text.startswith("```json"): text = text[7:-3]
-            if text.startswith("```"): text = text[3:-3]
+            if text.startswith("```json") and text.endswith("```"):
+                text = text[7:-3].strip()
+            elif text.startswith("```") and text.endswith("```"):
+                text = text[3:-3].strip()
 
             try:
                 data = json.loads(text)
@@ -1458,13 +1480,10 @@ TRANSCRIPT:
             logger.info(f"OpenAI response length: {len(text)} chars")
 
             # Handle potential markdown wrappers
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+            if text.startswith("```json") and text.endswith("```"):
+                text = text[7:-3].strip()
+            elif text.startswith("```") and text.endswith("```"):
+                text = text[3:-3].strip()
 
             data = json.loads(text)
             data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
@@ -1535,13 +1554,10 @@ TRANSCRIPT:
             logger.info(f"Anthropic response length: {len(text)} chars")
 
             # Handle potential markdown wrappers
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+            if text.startswith("```json") and text.endswith("```"):
+                text = text[7:-3].strip()
+            elif text.startswith("```") and text.endswith("```"):
+                text = text[3:-3].strip()
 
             data = json.loads(text)
             data["date"] = datetime.now().strftime("%b %d at %I:%M %p")
@@ -1574,169 +1590,23 @@ TRANSCRIPT:
         except Exception as e:
             logger.error(f"Save history error: {e}")
 
+        # Auto-export to Obsidian vault
+        try:
+            obsidian_enabled = self.config.getboolean("OBSIDIAN", "enabled", fallback=False)
+            if obsidian_enabled:
+                from obsidian_export import export_meeting_to_obsidian
+                vault_path = self.config.get("OBSIDIAN", "vault_path", fallback="")
+                folder = self.config.get("OBSIDIAN", "folder", fallback="Meetings")
+                if vault_path:
+                    path = export_meeting_to_obsidian(entry, vault_path, folder)
+                    if path:
+                        logger.info(f"Auto-exported to Obsidian: {path}")
+        except Exception as e:
+            logger.error(f"Obsidian export error: {e}")
+
     def load_history(self):
         if os.path.exists(self.history_file):
             try:
                 with open(self.history_file, 'r') as f: self.chat_history = json.load(f)
             except Exception: self.chat_history = []
 
-    # --- JOURNAL SUPPORT ---
-
-    def __init_journal(self):
-        """Initialize journal storage"""
-        if not hasattr(self, 'journal_file'):
-            self.journal_file = "journal_history.json"
-            self.journal_entries = []
-            self.load_journal()
-
-    def load_journal(self):
-        """Load journal entries from file"""
-        self.__init_journal()
-        if os.path.exists(self.journal_file):
-            try:
-                with open(self.journal_file, 'r') as f:
-                    self.journal_entries = json.load(f)
-            except Exception:
-                self.journal_entries = []
-
-    def save_journal(self):
-        """Save journal entries to file"""
-        self.__init_journal()
-        try:
-            with open(self.journal_file, 'w') as f:
-                json.dump(self.journal_entries, f, indent=4)
-        except Exception as e:
-            logger.error(f"Save journal error: {e}")
-
-    def create_journal_entry(self, entry_text: str) -> dict:
-        """Create a new journal entry"""
-        self.__init_journal()
-        import uuid
-        entry = {
-            "id": str(uuid.uuid4()),
-            "date": datetime.now().strftime("%b %d, %Y at %I:%M %p"),
-            "timestamp": str(datetime.now()),
-            "entry": entry_text,
-            "ai_suggestions": ""
-        }
-        self.journal_entries.insert(0, entry)
-        self.save_journal()
-        return entry
-
-    def get_journal_entries(self) -> list:
-        """Get all journal entries"""
-        self.__init_journal()
-        return self.journal_entries
-
-    def optimize_journal_entry(self, entry_id: str) -> str:
-        """Generate AI suggestions for a journal entry"""
-        self.__init_journal()
-
-        # Find the entry
-        entry = None
-        for e in self.journal_entries:
-            if e.get("id") == entry_id:
-                entry = e
-                break
-
-        if not entry:
-            return "Entry not found"
-
-        entry_text = entry.get("entry", "")
-
-        # Use Gemini to generate suggestions
-        if not GOOGLE_GENAI_AVAILABLE:
-            return "AI suggestions require Google GenAI library"
-
-        key = self._get_api_key('gemini')
-        if not key:
-            return "Please configure your Gemini API key in settings"
-
-        try:
-            client = genai.Client(api_key=key)
-            selected_model = self.config['SETTINGS'].get('gemini_model', 'gemini-2.0-flash-exp')
-
-            prompt = f"""You are a thoughtful life coach and productivity assistant.
-            Based on this journal entry, provide helpful suggestions, insights, or action items.
-            Be supportive and constructive. Keep response concise (2-4 sentences).
-
-            Journal entry: "{entry_text}"
-            """
-
-            response = client.models.generate_content(
-                model=selected_model,
-                contents=[prompt]
-            )
-
-            suggestions = response.text.strip()
-
-            # Update the entry
-            entry["ai_suggestions"] = suggestions
-            self.save_journal()
-
-            return suggestions
-
-        except Exception as e:
-            logger.error(f"Journal optimization error: {e}")
-            return f"Error generating suggestions: {self._safe_error_message(e)}"
-
-    # --- SESSION MANAGEMENT ---
-
-    def __init_session(self):
-        """Initialize session storage"""
-        if not hasattr(self, 'session_file'):
-            self.session_file = "session.json"
-            self.session = {}
-            self.load_session()
-
-    def load_session(self):
-        """Load session from file"""
-        self.__init_session()
-        if os.path.exists(self.session_file):
-            try:
-                with open(self.session_file, 'r') as f:
-                    self.session = json.load(f)
-            except Exception:
-                self.session = {}
-
-    def save_session(self):
-        """Save session to file"""
-        self.__init_session()
-        try:
-            with open(self.session_file, 'w') as f:
-                json.dump(self.session, f, indent=4)
-        except Exception as e:
-            logger.error(f"Save session error: {e}")
-
-    def login(self, provider: str, email: str = None) -> bool:
-        """Log in a user"""
-        self.__init_session()
-        self.session = {
-            "logged_in": True,
-            "provider": provider,
-            "email": email or f"user@{provider}.com",
-            "login_time": str(datetime.now())
-        }
-        self.save_session()
-        logger.info(f"User logged in via {provider}")
-        return True
-
-    def logout(self):
-        """Log out the user"""
-        self.__init_session()
-        self.session = {"logged_in": False}
-        self.save_session()
-        logger.info("User logged out")
-
-    def is_logged_in(self) -> bool:
-        """Check if user is logged in"""
-        self.__init_session()
-        return self.session.get("logged_in", False)
-
-    def get_user_info(self) -> dict:
-        """Get current user info"""
-        self.__init_session()
-        return {
-            "email": self.session.get("email", ""),
-            "provider": self.session.get("provider", ""),
-        }
