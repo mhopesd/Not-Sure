@@ -47,6 +47,14 @@ except ImportError:
 
 import whisper
 
+# Continuous-mode engine (lazy: only imported when feature is used)
+try:
+    from continuous_session import ContinuousSession, ContinuousSessionUnavailable
+    CONTINUOUS_AVAILABLE = True
+except Exception as _cs_import_err:
+    CONTINUOUS_AVAILABLE = False
+    logger.warning(f"Continuous mode module not importable: {_cs_import_err}")
+
 class AudioCaptureError(Exception): pass
 
 # --- Backend Logic (EnhancedAudioApp) ---
@@ -110,6 +118,15 @@ class EnhancedAudioApp:
         self.coach_alerts = []
         self.coach_callback = None  # Called when new alerts arrive (UI updates)
         self._coach_enabled = False
+
+        # Continuous-mode state (hours-long diarized live transcription)
+        self.continuous_mode = False
+        self.continuous_session = None  # type: Optional[ContinuousSession]
+        self.continuous_thread = None
+        self.segment_callback = None             # fn(session_id, segment_dict)
+        self.continuous_speaker_callback = None  # fn(session_id, speaker_id, name|None)
+        self._continuous_chunk_index = 0
+        self._continuous_session_offset = 0.0  # cumulative session seconds processed
 
         # Resolve ffmpeg to absolute path once (prevents PATH manipulation attacks)
         self._ffmpeg_path = shutil.which('ffmpeg')
@@ -212,6 +229,14 @@ class EnhancedAudioApp:
             'feed_urls': '',
             'feed_refresh_hours': '4',
             'coach_interval': '30'
+        }
+        self.config['CONTINUOUS'] = {
+            'hf_token': '',
+            'chunk_seconds': '20',
+            'overlap_seconds': '2',
+            'embedding_threshold': '0.70',
+            'whisper_model': 'small',
+            'autosave_every_n_chunks': '5'
         }
         try:
             if os.path.exists(self.config_file):
@@ -360,25 +385,46 @@ class EnhancedAudioApp:
                 logger.error(f"Failed to open Audio MIDI Setup: {e}")
             return
 
+        # If continuous mode requested, build the session before flipping
+        # is_recording so we can fail cleanly without leaking a half-started run.
+        if self.continuous_mode:
+            try:
+                self._build_continuous_session()
+            except ContinuousSessionUnavailable as e:
+                self.update_status(f"Continuous mode unavailable: {e}")
+                logger.error(f"Continuous session build failed: {e}")
+                return
+
         self.is_recording = True
 
         with self._state_lock:
             self.live_transcript_text = ""  # Reset live transcript accumulator
-        
+
         self.recording_thread = threading.Thread(target=self.record_audio)
         self.recording_thread.start()
-        
-        self.transcription_thread = threading.Thread(target=self.live_transcribe_loop)
-        self.transcription_thread.start()
-        
-        self.summary_thread = threading.Thread(target=self.live_summary_loop)
-        self.summary_thread.start()
 
-        # Start coach thread if enabled
-        self.coach_thread = None
-        if self._coach_enabled:
-            self.coach_thread = threading.Thread(target=self.live_coach_loop)
-            self.coach_thread.start()
+        if self.continuous_mode:
+            # Continuous mode owns its own live transcription loop and skips
+            # the short-clip summary/coach paths.
+            self._continuous_chunk_index = 0
+            self._continuous_session_offset = 0.0
+            self.continuous_thread = threading.Thread(target=self.continuous_loop)
+            self.continuous_thread.start()
+            self.transcription_thread = None
+            self.summary_thread = None
+            self.coach_thread = None
+        else:
+            self.transcription_thread = threading.Thread(target=self.live_transcribe_loop)
+            self.transcription_thread.start()
+
+            self.summary_thread = threading.Thread(target=self.live_summary_loop)
+            self.summary_thread.start()
+
+            # Start coach thread if enabled
+            self.coach_thread = None
+            if self._coach_enabled:
+                self.coach_thread = threading.Thread(target=self.live_coach_loop)
+                self.coach_thread.start()
 
         self.recording_start_time = datetime.now()
         self.update_status("● Initializing...")
@@ -419,8 +465,13 @@ class EnhancedAudioApp:
                 self.summary_thread.join(timeout=3.0)
             if hasattr(self, 'coach_thread') and self.coach_thread:
                 self.coach_thread.join(timeout=3.0)
+            if self.continuous_thread:
+                # Final chunk can take a moment to diarize; give it longer.
+                self.continuous_thread.join(timeout=30.0)
             # Clean up coach state after threads are done
             self._coach_enabled = False
+            if self.continuous_mode:
+                self._save_continuous_session()
             self.process_audio()
         finally:
             self._processing_audio = False
@@ -434,7 +485,10 @@ class EnhancedAudioApp:
         self.part_file = self.temp_audio_file + '.part'
         logger.info(f"Writing audio to {self.part_file} (atomic)")
         
-        q = queue.Queue()
+        # Bounded queue so a stalled writer can't accumulate hours of audio in RAM.
+        # 500 blocks ≈ 30s of headroom at typical sounddevice block sizes; the writer
+        # loop drains it every ~1s so this is generous.
+        q = queue.Queue(maxsize=500)
 
         def audio_callback(indata, frames, time, status):
             """This is called (from a separate thread) for each audio block."""
@@ -455,7 +509,19 @@ class EnhancedAudioApp:
                     self.level_callback(norm_level)
                 except Exception: pass
 
-            q.put(indata.copy())
+            try:
+                q.put_nowait(indata.copy())
+            except queue.Full:
+                # Drop oldest block to make room — better than blocking the
+                # sounddevice callback thread, which would cause audio glitches.
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(indata.copy())
+                except queue.Full:
+                    logger.warning("Audio queue still full after drop; dropping current block")
 
         try:
             device = None
@@ -589,6 +655,242 @@ class EnhancedAudioApp:
                 logger.debug(f"Live transcribe error (will retry): {e}")
 
         logger.info(f"Live transcription loop ended. Total transcriptions: {transcribe_count}")
+
+    # ------------------------------------------------------------------
+    # Continuous mode (hours-long diarized live transcription)
+    # ------------------------------------------------------------------
+
+    def enable_continuous_mode(self, enabled: bool) -> None:
+        """Toggle continuous mode. Must be set before start_recording()."""
+        if self.is_recording:
+            logger.warning("enable_continuous_mode ignored: recording already active")
+            return
+        if enabled and not CONTINUOUS_AVAILABLE:
+            self.update_status("Continuous mode dependencies missing — run pip install -r requirements.txt")
+            logger.error("enable_continuous_mode(True) but continuous_session module unavailable")
+            return
+        self.continuous_mode = bool(enabled)
+        logger.info(f"continuous_mode = {self.continuous_mode}")
+
+    def _build_continuous_session(self) -> None:
+        """Construct the ContinuousSession with config-driven params.
+        Raises ContinuousSessionUnavailable on missing token / model load failure."""
+        if not CONTINUOUS_AVAILABLE:
+            raise ContinuousSessionUnavailable("continuous_session module not imported")
+        cfg = self.config['CONTINUOUS']
+        hf_token = (cfg.get('hf_token', '') or '').strip().replace('"', '').replace("'", "")
+        whisper_model = cfg.get('whisper_model', 'small')
+        threshold = float(cfg.get('embedding_threshold', '0.70'))
+
+        session_id = uuid.uuid4().hex[:12]
+        self.continuous_session = ContinuousSession(
+            session_id=session_id,
+            hf_token=hf_token,
+            whisper_model_name=whisper_model,
+            embedding_threshold=threshold,
+        )
+        # Warm up models on a background thread so the first chunk isn't slow.
+        threading.Thread(
+            target=self.continuous_session.warmup, daemon=True
+        ).start()
+        logger.info(f"Built ContinuousSession id={session_id} whisper={whisper_model}")
+
+    def continuous_loop(self) -> None:
+        """Worker: every chunk_seconds, snip the .part file and ingest a chunk."""
+        cfg = self.config['CONTINUOUS']
+        chunk_seconds = float(cfg.get('chunk_seconds', '20'))
+        overlap_seconds = float(cfg.get('overlap_seconds', '2'))
+        autosave_every = int(cfg.get('autosave_every_n_chunks', '5'))
+
+        SAMPLE_RATE = 16000
+        session = self.continuous_session
+        if session is None:
+            logger.error("continuous_loop started without a session")
+            return
+
+        logger.info(
+            f"Continuous loop started: chunk={chunk_seconds}s overlap={overlap_seconds}s"
+        )
+
+        cursor = 0.0  # next chunk window starts here (in session-seconds)
+        # Wait until the recorder has actually created the .part file
+        deadline = time.time() + 30.0
+        while self.is_recording and (
+            not self.part_file or not os.path.exists(self.part_file)
+        ):
+            if time.time() > deadline:
+                logger.error("continuous_loop: .part file never appeared")
+                return
+            time.sleep(0.2)
+
+        while self.is_recording:
+            # Sleep until the next chunk's worth of audio has been captured.
+            # We check current file size to know how many samples are written.
+            target_end = cursor + chunk_seconds
+            self._wait_for_pcm_seconds(target_end, SAMPLE_RATE)
+            if not self.is_recording:
+                break
+            self._process_one_chunk(
+                cursor, chunk_seconds, overlap_seconds, SAMPLE_RATE, session
+            )
+            cursor = target_end
+            if self._continuous_chunk_index % autosave_every == 0:
+                self._save_continuous_session()
+
+        # Process any tail audio after stop
+        try:
+            if self.part_file and os.path.exists(self.part_file):
+                tail_seconds = self._pcm_seconds_available(SAMPLE_RATE) - cursor
+                if tail_seconds > 1.0:
+                    logger.info(f"continuous_loop: processing {tail_seconds:.1f}s of tail audio")
+                    self._process_one_chunk(
+                        cursor, tail_seconds, overlap_seconds, SAMPLE_RATE, session
+                    )
+        except Exception as e:
+            logger.warning(f"continuous_loop tail processing failed: {e}")
+
+        logger.info(
+            f"Continuous loop ended after {self._continuous_chunk_index} chunks"
+        )
+
+    def _pcm_seconds_available(self, sample_rate: int) -> float:
+        """How many seconds of PCM are in the growing .part file right now."""
+        try:
+            size = os.path.getsize(self.part_file)
+            # 44-byte WAV header, 16-bit mono = 2 bytes/sample
+            pcm_bytes = max(0, size - 44)
+            return pcm_bytes / (sample_rate * 2)
+        except Exception:
+            return 0.0
+
+    def _wait_for_pcm_seconds(self, needed: float, sample_rate: int) -> None:
+        """Block until the .part file contains at least `needed` seconds of PCM,
+        or recording stops."""
+        while self.is_recording:
+            if self._pcm_seconds_available(sample_rate) >= needed:
+                return
+            time.sleep(0.5)
+
+    def _process_one_chunk(
+        self,
+        cursor: float,
+        chunk_seconds: float,
+        overlap_seconds: float,
+        sample_rate: int,
+        session,
+    ) -> None:
+        """Extract one chunk window, run it through the session, emit segments."""
+        # Include overlap *before* the cursor so the diarizer sees speaker continuity.
+        clip_start = max(0.0, cursor - overlap_seconds)
+        clip_duration = (cursor - clip_start) + chunk_seconds
+        chunk_idx = self._continuous_chunk_index
+        chunk_wav = f"{self.part_file}.chunk{chunk_idx}.wav"
+
+        try:
+            self._extract_pcm_chunk(
+                self.part_file, clip_start, clip_duration, chunk_wav, sample_rate
+            )
+        except Exception as e:
+            logger.error(f"chunk extract failed (idx={chunk_idx}): {e}")
+            return
+
+        try:
+            # ingest_chunk returns segments with start/end in chunk-local seconds.
+            # Convert to session-absolute and skip any that fall in the pre-overlap
+            # region (already emitted in the previous chunk).
+            known_before = set(session.known_speakers().keys()) if chunk_idx > 0 else set()
+            segments = session.ingest_chunk(chunk_wav, chunk_offset_seconds=clip_start)
+            for seg in segments:
+                if seg.start < cursor and chunk_idx > 0:
+                    continue  # in overlap region, already reported
+                if self.segment_callback:
+                    self.segment_callback(session.session_id, seg.to_dict())
+            # Announce any newly-discovered speakers
+            if self.continuous_speaker_callback:
+                for sid, name in session.known_speakers().items():
+                    if sid not in known_before:
+                        self.continuous_speaker_callback(session.session_id, sid, name)
+        except Exception as e:
+            logger.error(f"chunk ingest failed (idx={chunk_idx}): {e}")
+        finally:
+            try:
+                os.remove(chunk_wav)
+            except OSError:
+                pass
+            self._continuous_chunk_index += 1
+
+    def _extract_pcm_chunk(
+        self,
+        part_file: str,
+        start_sec: float,
+        duration_sec: float,
+        out_path: str,
+        sample_rate: int,
+    ) -> None:
+        """Slice [start, start+duration] from the growing .part WAV file.
+
+        Works on the growing file by reading the raw PCM bytes directly (the
+        WAV header at the front of the .part is fine; only the size fields are
+        stale, which we ignore by computing offsets ourselves).
+        """
+        bytes_per_sample = 2  # 16-bit mono
+        header_size = 44
+        start_byte = header_size + int(start_sec * sample_rate) * bytes_per_sample
+        n_bytes = int(duration_sec * sample_rate) * bytes_per_sample
+
+        current_size = os.path.getsize(part_file)
+        end_byte = min(start_byte + n_bytes, current_size)
+        if end_byte <= start_byte:
+            raise ValueError(f"empty slice: start={start_byte} end={end_byte}")
+
+        with open(part_file, 'rb') as f:
+            f.seek(start_byte)
+            pcm = f.read(end_byte - start_byte)
+
+        # Write a fresh valid WAV
+        with wave.open(out_path, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(bytes_per_sample)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm)
+
+    def rename_continuous_speaker(self, speaker_id: str, name: str) -> bool:
+        """Rename a detected speaker. Returns True if the id existed."""
+        if not self.continuous_session:
+            return False
+        ok = self.continuous_session.rename_speaker(speaker_id, name)
+        if ok and self.continuous_speaker_callback:
+            self.continuous_speaker_callback(
+                self.continuous_session.session_id, speaker_id, name
+            )
+        return ok
+
+    def get_continuous_state(self) -> dict:
+        """Snapshot of the live session — segments + speaker name map."""
+        if not self.continuous_session:
+            return {}
+        sess = self.continuous_session
+        return {
+            "session_id": sess.session_id,
+            "speakers": sess.known_speakers(),
+            "segments": [s.to_dict() for s in sess.all_segments()],
+        }
+
+    def _save_continuous_session(self) -> None:
+        """Persist the current continuous session to history_directory (crash-safe)."""
+        if not self.continuous_session:
+            return
+        try:
+            path = os.path.join(
+                self.history_directory,
+                f"session_{self.continuous_session.session_id}.json",
+            )
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.continuous_session.to_dict(), f, indent=2)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.warning(f"continuous session autosave failed: {e}")
 
     def _call_llm_json(self, prompt, llm=None):
         """Send a prompt to the configured LLM and return parsed JSON dict.
