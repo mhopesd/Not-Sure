@@ -84,6 +84,36 @@ async def broadcast_error(error_message: str):
         except Exception:
             pass
 
+async def broadcast_segment(session_id: str, segment: dict):
+    """Send one diarized transcript segment to all connected WebSocket clients"""
+    for ws in active_websockets:
+        try:
+            await ws.send_json({
+                "type": "segment",
+                "session_id": session_id,
+                "segment": segment,
+            })
+        except Exception:
+            pass
+
+async def broadcast_speaker_update(session_id: str, speaker_id: str, name):
+    """Send a speaker added/renamed event to all connected WebSocket clients.
+
+    name=None means a newly-detected unlabeled speaker; a string means a rename
+    (either user-driven or initial label).
+    """
+    event_type = "speaker_renamed" if name else "speaker_added"
+    for ws in active_websockets:
+        try:
+            await ws.send_json({
+                "type": event_type,
+                "session_id": session_id,
+                "speaker_id": speaker_id,
+                "name": name,
+            })
+        except Exception:
+            pass
+
 def status_callback(message: str):
     if _event_loop:
         asyncio.run_coroutine_threadsafe(broadcast_status(message), _event_loop)
@@ -108,6 +138,16 @@ def error_callback(error_message: str):
     if _event_loop:
         asyncio.run_coroutine_threadsafe(broadcast_error(error_message), _event_loop)
 
+def segment_callback(session_id: str, segment: dict):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(broadcast_segment(session_id, segment), _event_loop)
+
+def continuous_speaker_callback(session_id: str, speaker_id: str, name):
+    if _event_loop:
+        asyncio.run_coroutine_threadsafe(
+            broadcast_speaker_update(session_id, speaker_id, name), _event_loop
+        )
+
 @asynccontextmanager
 async def lifespan(app):
     """Initialize the backend on server start"""
@@ -120,6 +160,8 @@ async def lifespan(app):
     backend_app.transcript_callback = transcript_callback
     backend_app.level_callback = level_callback
     backend_app.summary_callback = live_summary_callback
+    backend_app.segment_callback = segment_callback
+    backend_app.continuous_speaker_callback = continuous_speaker_callback
     print("✓ Backend initialized")
     yield
 
@@ -160,6 +202,10 @@ class RecordingStartRequest(BaseModel):
     title: Optional[str] = None
     speakers: Optional[List[str]] = []
     device: Optional[str] = None
+    continuous: Optional[bool] = False  # multi-hour live diarized mode
+
+class SpeakerRenameRequest(BaseModel):
+    name: str
 
 class RecordingStopResponse(BaseModel):
     success: bool
@@ -225,10 +271,27 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
+    continuous_ready = False
+    continuous_reason = None
+    if backend_app:
+        try:
+            from backend import CONTINUOUS_AVAILABLE
+            if not CONTINUOUS_AVAILABLE:
+                continuous_reason = "module_unavailable"
+            else:
+                hf_token = backend_app.config['CONTINUOUS'].get('hf_token', '').strip()
+                if not hf_token:
+                    continuous_reason = "missing_hf_token"
+                else:
+                    continuous_ready = True
+        except Exception as e:
+            continuous_reason = f"error:{e}"
     return {
         "status": "healthy",
         "backend_ready": backend_app is not None,
-        "model_loaded": backend_app.whisper_model is not None if backend_app else False
+        "model_loaded": backend_app.whisper_model is not None if backend_app else False,
+        "continuous_ready": continuous_ready,
+        "continuous_reason": continuous_reason,
     }
 
 # ==================== PERMISSIONS ====================
@@ -293,13 +356,17 @@ async def start_recording(request: RecordingStartRequest):
         device_map = {"microphone": "microphone", "system_audio": "system", "hybrid": "hybrid"}
         backend_app.recording_mode = device_map.get(request.device, "microphone")
 
+    # Apply continuous-mode flag (must be set before start_recording fires)
+    backend_app.enable_continuous_mode(bool(request.continuous))
+
     # Start recording in background thread
     threading.Thread(target=backend_app.start_recording, daemon=True).start()
-    
+
     return {
         "success": True,
         "message": "Recording started",
-        "title": request.title
+        "title": request.title,
+        "continuous": bool(request.continuous),
     }
 
 @app.post("/api/recordings/mute")
@@ -334,20 +401,56 @@ async def recording_status():
     """Get current recording status with live meeting intelligence"""
     if not backend_app:
         raise HTTPException(status_code=503, detail="Backend not initialized")
-    
+
     duration = 0
     if backend_app.is_recording and backend_app.recording_start_time:
         from datetime import datetime as dt
         duration = int((dt.now() - backend_app.recording_start_time).total_seconds())
-    
+
     insights = backend_app.get_live_insights() if hasattr(backend_app, 'get_live_insights') else {}
+    continuous_session_id = None
+    if backend_app.continuous_session:
+        continuous_session_id = backend_app.continuous_session.session_id
     return {
         "is_recording": backend_app.is_recording,
         "duration": duration,
         "meeting_type": insights.get("meeting_type"),
         "topic": insights.get("topic", ""),
         "sentiment": insights.get("sentiment", "neutral"),
+        "continuous_mode": backend_app.continuous_mode,
+        "continuous_session_id": continuous_session_id,
     }
+
+# ==================== CONTINUOUS SESSIONS ====================
+
+@app.get("/api/sessions/current")
+async def get_current_session():
+    """Snapshot of the active continuous session: segments + speaker map.
+
+    Returns an empty dict if no continuous session is running. Useful for the
+    React UI to repopulate on reconnect or first paint.
+    """
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    return backend_app.get_continuous_state()
+
+@app.patch("/api/sessions/{session_id}/speakers/{speaker_id}")
+async def rename_speaker(session_id: str, speaker_id: str, req: SpeakerRenameRequest):
+    """Assign a human-readable name to a detected speaker.
+
+    The new name will retroactively apply to every segment for that speaker in
+    the UI (the React layer maps speaker_id → name from this map).
+    """
+    if not backend_app:
+        raise HTTPException(status_code=503, detail="Backend not initialized")
+    if not backend_app.continuous_session:
+        raise HTTPException(status_code=409, detail="No continuous session active")
+    if backend_app.continuous_session.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Session id does not match active session")
+    ok = backend_app.rename_continuous_speaker(speaker_id, req.name)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Unknown speaker_id: {speaker_id}")
+    return {"success": True, "speaker_id": speaker_id, "name": req.name}
 
 
 @app.get("/api/recordings/insights")

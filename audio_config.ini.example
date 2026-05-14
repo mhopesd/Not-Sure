@@ -21,3 +21,26 @@ feed_urls =
 feed_refresh_hours = 4
 # How often the coach analyzes transcript during recording (seconds)
 coach_interval = 30
+
+[CONTINUOUS]
+# Continuous mode: live diarized transcription for hours-long sessions.
+# Toggle per-recording in the UI; this section configures the engine.
+#
+# Required: HuggingFace token with access to pyannote/speaker-diarization-3.1
+#   1. Create account at https://huggingface.co
+#   2. Accept terms at https://hf.co/pyannote/speaker-diarization-3.1
+#   3. Accept terms at https://hf.co/pyannote/segmentation-3.0
+#   4. Create read token at https://hf.co/settings/tokens and paste below
+hf_token =
+# Length of each rolling chunk in seconds (15-30 is a good range)
+chunk_seconds = 20
+# Overlap with previous chunk so speakers split on a boundary still match
+overlap_seconds = 2
+# Cosine similarity threshold for matching a chunk speaker to an existing one.
+# Higher = stricter (less merging, more new speakers). 0.65-0.75 typical.
+embedding_threshold = 0.70
+# faster-whisper model size: tiny, base, small, medium, large-v3
+# 'small' is a good balance on Apple Silicon CPU; 'medium' if you have GPU
+whisper_model = small
+# Auto-save session JSON after this many chunks (crash safety)
+autosave_every_n_chunks = 5

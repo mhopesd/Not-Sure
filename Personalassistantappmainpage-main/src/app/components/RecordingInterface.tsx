@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
-import { Mic, Square, Settings2, Sparkles, CheckCircle2, Lightbulb, Zap } from 'lucide-react';
+import { Mic, Square, Settings2, Sparkles, CheckCircle2, Lightbulb, Zap, Infinity } from 'lucide-react';
 import { MicrophoneSelector } from './MicrophoneSelector';
 import { ProcessingProgress } from './ProcessingProgress';
+import { ContinuousModePanel, type Segment } from './ContinuousModePanel';
 import { getApiUrl, getApiHeaders } from '../config/api';
 
 interface RecordingInterfaceProps {
@@ -28,8 +29,29 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
     suggested_questions?: string[];
   } | null>(null);
 
+  // Continuous mode — long sessions with live diarized transcription.
+  const [continuousMode, setContinuousMode] = useState(false);
+  const [continuousSessionId, setContinuousSessionId] = useState<string | null>(null);
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [speakers, setSpeakers] = useState<Record<string, string | null>>({});
+  const [continuousReady, setContinuousReady] = useState<boolean | null>(null);
+  const [continuousReason, setContinuousReason] = useState<string | null>(null);
+
   const durationIntervalRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // On mount, ask the backend whether continuous mode is available
+  // (deps installed + HuggingFace token present). Used to gate the toggle.
+  useEffect(() => {
+    fetch(getApiUrl('/api/health'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        setContinuousReady(Boolean(data.continuous_ready));
+        setContinuousReason(data.continuous_reason ?? null);
+      })
+      .catch(() => setContinuousReady(false));
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -61,6 +83,11 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
 
   const startRecording = async (deviceId: string) => {
     try {
+      // Reset continuous-mode state before connecting WS
+      setSegments([]);
+      setSpeakers({});
+      setContinuousSessionId(null);
+
       // Connect WebSocket for live updates
       connectWebSocket();
 
@@ -73,13 +100,27 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
         },
         body: JSON.stringify({
           device: deviceId,
-          title: meetingTitle || undefined
+          title: meetingTitle || undefined,
+          continuous: continuousMode,
         })
       });
 
       if (!response.ok) {
         const data = await response.json();
         throw new Error(data.detail || 'Failed to start recording');
+      }
+
+      // After start, the backend has minted a session id; fetch it.
+      if (continuousMode) {
+        try {
+          const statusResp = await fetch(getApiUrl('/api/recordings/status'));
+          if (statusResp.ok) {
+            const status = await statusResp.json();
+            if (status.continuous_session_id) {
+              setContinuousSessionId(status.continuous_session_id);
+            }
+          }
+        } catch { /* non-fatal */ }
       }
 
       setRecordingState('recording');
@@ -126,7 +167,7 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
   const handleWebSocketMessage = (message: any) => {
     switch (message.type) {
       case 'transcript_update':
-        // Live transcript updates could be shown here
+        // Short-clip live transcript — continuous mode uses 'segment' instead.
         break;
       case 'audio_level':
         // Audio level for VU meter could be handled here
@@ -134,6 +175,30 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
       case 'live_summary':
         if (message.data) {
           setLiveInsights(message.data);
+        }
+        break;
+      case 'segment':
+        if (message.segment) {
+          setSegments(prev => [...prev, message.segment as Segment]);
+          // Ensure any speaker referenced by the segment is in the map even if
+          // the speaker_added event raced behind this one.
+          const sid = message.segment.speaker_id as string;
+          setSpeakers(prev => sid in prev ? prev : { ...prev, [sid]: null });
+        }
+        if (message.session_id && !continuousSessionId) {
+          setContinuousSessionId(message.session_id);
+        }
+        break;
+      case 'speaker_added':
+        if (message.speaker_id) {
+          setSpeakers(prev => message.speaker_id in prev
+            ? prev
+            : { ...prev, [message.speaker_id]: message.name ?? null });
+        }
+        break;
+      case 'speaker_renamed':
+        if (message.speaker_id) {
+          setSpeakers(prev => ({ ...prev, [message.speaker_id]: message.name ?? null }));
         }
         break;
       case 'status':
@@ -144,6 +209,12 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
         }
         break;
     }
+  };
+
+  const handleSpeakerRenamed = (speakerId: string, name: string) => {
+    // Optimistic update; the WS speaker_renamed event will arrive too but
+    // applying immediately keeps the UI snappy.
+    setSpeakers(prev => ({ ...prev, [speakerId]: name }));
   };
 
   const stopRecording = async () => {
@@ -175,6 +246,9 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
     setDuration(0);
     setMeetingTitle('');
     setScratchpad('');
+    setSegments([]);
+    setSpeakers({});
+    setContinuousSessionId(null);
     onRecordingComplete();
   };
 
@@ -226,6 +300,46 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
             />
           </div>
 
+          {/* Continuous mode toggle — for hours-long sessions with live
+              diarized transcription. Disabled if backend isn't configured. */}
+          <div className="w-full max-w-md mb-6">
+            <label
+              className={
+                'flex items-start gap-3 p-3 rounded-lg border transition-colors ' +
+                (continuousReady === false
+                  ? 'bg-white/[0.02] border-white/5 opacity-60 cursor-not-allowed'
+                  : 'bg-white/5 border-white/10 hover:border-[#2774AE]/40 cursor-pointer')
+              }
+            >
+              <input
+                type="checkbox"
+                checked={continuousMode}
+                disabled={continuousReady === false}
+                onChange={e => setContinuousMode(e.target.checked)}
+                className="mt-0.5 accent-[#2774AE]"
+              />
+              <div className="flex-1">
+                <div className="flex items-center gap-2 text-sm font-medium text-white">
+                  <Infinity className="w-4 h-4 text-[#FFD100]" />
+                  Continuous mode
+                </div>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  Hours-long session with live transcription and automatic
+                  speaker detection. Type a name to label each speaker.
+                </div>
+                {continuousReady === false && continuousReason && (
+                  <div className="text-xs text-red-400 mt-1.5">
+                    {continuousReason === 'missing_hf_token'
+                      ? 'Add a HuggingFace token to audio_config.ini [CONTINUOUS] to enable.'
+                      : continuousReason === 'module_unavailable'
+                        ? 'Install continuous-mode deps: pip install -r requirements.txt'
+                        : `Unavailable (${continuousReason}).`}
+                  </div>
+                )}
+              </div>
+            </label>
+          </div>
+
           {/* Start button */}
           <button
             onClick={handleStartClick}
@@ -245,29 +359,40 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
 
       {/* Recording state - show tabs and scratchpad */}
       {isRecording && (
-        <div className="flex-1 flex flex-col">
-          {/* Tabs */}
-          <div className="flex gap-6 border-b border-white/10 mb-6">
-            <button className="pb-3 text-white border-b-2 border-[#2774AE] font-medium">
-              Scratchpad
-            </button>
-            <button className="pb-3 text-gray-400 hover:text-white transition-colors">
-              Tasks
-            </button>
-          </div>
-
-          {/* Scratchpad */}
-          <div className="flex-1 mb-6">
-            <textarea
-              value={scratchpad}
-              onChange={(e) => setScratchpad(e.target.value)}
-              placeholder="Write private notes..."
-              className="w-full h-full min-h-[200px] bg-transparent border-none text-white placeholder-gray-500 focus:outline-none resize-none"
+        <div className="flex-1 flex flex-col min-h-0">
+          {continuousMode ? (
+            <ContinuousModePanel
+              sessionId={continuousSessionId}
+              segments={segments}
+              speakers={speakers}
+              onSpeakerRenamed={handleSpeakerRenamed}
             />
-          </div>
+          ) : (
+            <>
+              {/* Tabs */}
+              <div className="flex gap-6 border-b border-white/10 mb-6">
+                <button className="pb-3 text-white border-b-2 border-[#2774AE] font-medium">
+                  Scratchpad
+                </button>
+                <button className="pb-3 text-gray-400 hover:text-white transition-colors">
+                  Tasks
+                </button>
+              </div>
 
-          {/* Live Insights Panel */}
-          {liveInsights && liveInsights.key_points && liveInsights.key_points.length > 0 && (
+              {/* Scratchpad */}
+              <div className="flex-1 mb-6">
+                <textarea
+                  value={scratchpad}
+                  onChange={(e) => setScratchpad(e.target.value)}
+                  placeholder="Write private notes..."
+                  className="w-full h-full min-h-[200px] bg-transparent border-none text-white placeholder-gray-500 focus:outline-none resize-none"
+                />
+              </div>
+            </>
+          )}
+
+          {/* Live Insights Panel — short-clip mode only */}
+          {!continuousMode && liveInsights && liveInsights.key_points && liveInsights.key_points.length > 0 && (
             <div className="mb-6 p-4 bg-[#2774AE]/10 border border-[#2774AE]/20 rounded-xl space-y-4">
               {/* Header row: title + meeting type badge + sentiment */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -360,10 +485,12 @@ export function RecordingInterface({ onRecordingComplete }: RecordingInterfacePr
             </div>
           )}
 
-          {/* Info message */}
-          <div className="text-center text-gray-500 text-sm mb-6">
-            {liveInsights ? 'Insights updating as the conversation continues...' : 'Transcript and summary will be generated once the meeting is over'}
-          </div>
+          {/* Info message — short-clip mode only (continuous mode shows the live transcript instead) */}
+          {!continuousMode && (
+            <div className="text-center text-gray-500 text-sm mb-6">
+              {liveInsights ? 'Insights updating as the conversation continues...' : 'Transcript and summary will be generated once the meeting is over'}
+            </div>
+          )}
 
           {/* Recording controls - fixed at bottom */}
           <div className="flex items-center justify-center gap-4 py-4 bg-[#1a1a1a] rounded-xl">
